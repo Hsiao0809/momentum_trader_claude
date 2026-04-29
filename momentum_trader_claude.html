@@ -98,7 +98,8 @@
     <label>Paper gate <input type="number" value="82" disabled style="width:54px"></label>
   </div>
   <div class="controls" style="margin-top:8px">
-    <label>Risk/trade <input type="text" value="1%" disabled style="width:56px"></label>
+    <label>Equity <input id="initialEquity" type="number" value="10000" min="100" step="100" style="width:90px"> U</label>
+    <label>Risk/trade <input id="riskPct" type="number" value="1" min="0.1" max="5" step="0.1" style="width:54px">%</label>
     <label>Stop <input type="text" value="ATR 1.2x · 3-8%" disabled style="width:130px"></label>
     <label>TP1 <input type="text" value="2R / 50%" disabled style="width:88px"></label>
     <label>Trail <input type="text" value="ATR 1.5x · min 8%" disabled style="width:134px"></label>
@@ -695,7 +696,34 @@ function setupAutoScan(){
   minIn.addEventListener('change', () => { if(cb.checked) apply(); });
 }
 
+function setupCapitalInputs(){
+  const riskIn = document.getElementById('riskPct');
+  const equityIn = document.getElementById('initialEquity');
+  riskIn.value = (CFG.riskPerTrade * 100);
+  equityIn.value = CFG.initialEquity;
+  riskIn.addEventListener('change', () => {
+    const v = clamp(Number(riskIn.value) || 1, 0.1, 5);
+    riskIn.value = v;
+    CFG.riskPerTrade = v / 100;
+    log(`Risk/trade 設為 ${v}%`);
+  });
+  equityIn.addEventListener('change', () => {
+    const v = Math.max(100, Number(equityIn.value) || 10000);
+    equityIn.value = v;
+    CFG.initialEquity = v;
+    if(!state.trades.length && !state.positions.length){
+      state.equity = v;
+      state.peakEquity = v;
+      saveState();
+      log(`Equity 設為 ${v} U`);
+    } else {
+      log(`Equity 已更新（不影響進行中的倉位）`);
+    }
+  });
+}
+
 paintAll();
+setupCapitalInputs();
 setupAutoScan();
 setInterval(() => { if(state.running) paperTick(); }, 60000);
 setInterval(refreshSignalPrices, 60000);
