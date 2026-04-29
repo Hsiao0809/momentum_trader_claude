@@ -1,0 +1,687 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Claude Momentum Dashboard</title>
+  <style>
+    :root{
+      --bg:#1F1E1D;--panel:#262624;--panel2:#2D2C2A;--panel3:#36342F;--border:#3A3835;
+      --text:#F5F4ED;--muted:#A8A29A;--accent:#D97757;--accent-soft:rgba(217,119,87,.12);
+      --green:#7BAE71;--red:#D9756A;--blue:#7AA8C9;--orange:#E5A35C;--purple:#B49AC9;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%;overflow:hidden}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft JhengHei",sans-serif;font-size:12px;-webkit-font-smoothing:antialiased}
+    header{height:140px;overflow:hidden;background:linear-gradient(180deg,#262624,#1F1E1D);border-bottom:1px solid var(--border);padding:10px 16px}
+    h1{margin:0 0 8px;color:var(--text);font-size:16px;font-weight:600;letter-spacing:-0.01em;display:flex;align-items:center;gap:8px}
+    h1::before{content:"";width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 12px rgba(217,119,87,.7)}
+    .subtitle{font-size:10px;color:var(--muted);font-weight:400;text-transform:uppercase;letter-spacing:0.08em;margin-left:4px}
+    h2{margin:0 0 5px;font-size:13px;font-weight:600;letter-spacing:-0.005em}
+    .controls{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;line-height:1.2}
+    label{display:flex;gap:6px;align-items:center;color:var(--muted);white-space:nowrap}
+    input,select{background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 7px;font-size:12px;height:28px;font-family:inherit;outline:none;transition:border-color .15s}
+    input:focus,select:focus{border-color:var(--accent)}
+    input[type=number]{width:70px}
+    input[type=checkbox]{width:14px;height:14px;accent-color:var(--accent);cursor:pointer}
+    input[disabled]{opacity:.55;color:var(--muted);cursor:not-allowed}
+    button{border:0;border-radius:6px;background:var(--accent);color:#1F1E1D;font-weight:600;padding:6px 12px;cursor:pointer;font-size:12px;height:28px;line-height:1;font-family:inherit;transition:filter .12s,transform .05s}
+    button:hover{filter:brightness(1.08)}
+    button:active{transform:translateY(1px)}
+    button.ghost{background:transparent;color:var(--text);border:1px solid var(--border)}
+    button.ghost:hover{background:var(--panel2);border-color:var(--accent);color:var(--accent)}
+    button.danger{background:transparent;color:var(--red);border:1px solid rgba(217,117,106,.4)}
+    button.danger:hover{background:rgba(217,117,106,.08)}
+    .status{color:var(--muted);min-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums;display:inline-flex;align-items:center}
+    .run-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--muted);margin-right:7px}
+    .run-dot.on{background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 1.8s ease-in-out infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+    .spark{vertical-align:middle;margin-left:6px;border-radius:4px;background:rgba(0,0,0,.15)}
+    main{height:calc(100vh - 140px);padding:10px 14px;display:grid;grid-template-rows:56px minmax(190px,30vh) minmax(120px,1fr) minmax(130px,1fr);grid-template-columns:1fr;gap:10px;max-width:1920px;margin:0 auto;overflow:hidden}
+    .metric-grid{display:grid;grid-template-columns:repeat(8,minmax(80px,1fr));gap:8px;min-height:0}
+    .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:7px 10px;min-height:0;display:flex;flex-direction:column;justify-content:center;transition:border-color .15s}
+    .card:hover{border-color:rgba(217,119,87,.3)}
+    .card .k{color:var(--muted);font-size:9.5px;line-height:1;letter-spacing:0.06em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .card .v{font-size:17px;font-weight:700;margin-top:4px;line-height:1.1;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-0.01em}
+    .pos{color:var(--green)}.neg{color:var(--red)}.muted{color:var(--muted)}.accent{color:var(--accent)}.blue{color:var(--blue)}.orange{color:var(--orange)}
+    section{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:10px 12px;min-width:0;min-height:0;overflow:hidden;display:flex;flex-direction:column}
+    .section-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px;flex:0 0 auto}
+    .section-head h2{margin:0}
+    .summary{color:var(--muted);font-size:11px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:70%;font-variant-numeric:tabular-nums}
+    .table-wrap{overflow:auto;min-height:0;flex:1;border:1px solid var(--border);border-radius:8px;background:var(--panel2)}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:5px 8px;border-bottom:1px solid var(--border);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;line-height:1.3;vertical-align:middle}
+    th{position:sticky;top:0;background:var(--panel3);z-index:3;color:var(--muted);font-size:10px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase}
+    th.sym,td.sym{text-align:left;position:sticky;left:0;z-index:4;background:var(--panel2);box-shadow:1px 0 0 var(--border)}
+    th.sym{z-index:6;background:var(--panel3)}
+    td.left,th.left{text-align:left}
+    tr:hover td{background:rgba(217,119,87,0.045)}
+    tr:hover td.sym{background:rgba(217,119,87,0.07)}
+    .pill{display:inline-block;border:1px solid var(--border);border-radius:999px;padding:2px 9px;font-size:11px;background:var(--panel3);font-weight:600;font-variant-numeric:tabular-nums}
+    .pill.live{color:var(--accent);border-color:rgba(217,119,87,.45);background:var(--accent-soft)}
+    .pill.high{color:var(--green);border-color:rgba(123,174,113,.45);background:rgba(123,174,113,.08)}
+    .reason{max-width:420px;overflow:hidden;text-overflow:ellipsis;text-align:left;color:var(--muted)}
+    a.sym-link{color:inherit;text-decoration:none;border-bottom:1px dashed transparent;transition:color .12s,border-color .12s}
+    a.sym-link:hover{color:var(--accent);border-bottom-color:var(--accent)}
+    .cols2{display:grid!important;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr)!important;gap:10px;min-height:0;overflow:hidden}
+    .trade-log-section,.lower-section{min-height:0;overflow:hidden}
+    .status-box{white-space:pre-wrap;color:var(--muted);font-size:11px;line-height:1.4;overflow:auto;margin-top:6px;max-height:42px;font-family:"SF Mono","JetBrains Mono",ui-monospace,Menlo,Consolas,monospace}
+    .badge{font-size:10px;padding:2px 6px;border-radius:4px;background:var(--panel3);color:var(--muted);margin-left:4px;font-weight:500}
+    ::-webkit-scrollbar{width:8px;height:8px}
+    ::-webkit-scrollbar-track{background:transparent}
+    ::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+    ::-webkit-scrollbar-thumb:hover{background:var(--muted)}
+    @media(max-width:900px){html,body{overflow:auto}header{height:auto;min-height:140px}main{height:auto;min-height:calc(100vh - 140px);grid-template-rows:auto;overflow:visible}.metric-grid{grid-template-columns:repeat(4,1fr)}.cols2{grid-template-columns:1fr!important}.summary{max-width:100%}}
+  </style>
+</head>
+<body>
+<header>
+  <h1>Claude Momentum Dashboard <span class="subtitle">Binance USD&Ⓜ; · Taiwan time</span></h1>
+  <div class="controls">
+    <button onclick="scanSignals()">Scan Signals</button>
+    <button class="ghost" onclick="runBacktest()">Run Backtest</button>
+    <button class="ghost" onclick="startPaper()">Start Paper</button>
+    <button class="ghost" onclick="stopPaper()">Stop Paper</button>
+    <button class="danger" onclick="resetPaper()">Reset</button>
+    <button class="ghost" onclick="downloadSignals()">Signals CSV</button>
+    <button class="ghost" onclick="downloadBacktest()">Backtest CSV</button>
+    <button class="ghost" onclick="downloadPaper()">Paper CSV</button>
+    <span id="statusLine" class="status"><span class="run-dot" id="runDot"></span>Ready</span>
+    <svg id="equitySpark" class="spark" width="120" height="24" viewBox="0 0 120 24"></svg>
+  </div>
+  <div class="controls" style="margin-top:8px">
+    <label>Universe <input id="scanLimit" type="number" value="80" min="5" max="200"></label>
+    <label>Backtest days <select id="days"><option>7</option><option selected>30</option><option>90</option></select></label>
+    <label>Min score <input id="minScore" type="number" value="70" min="60" max="95"></label>
+    <label>Backtest universe <input id="universe" type="number" value="30" min="3" max="80"></label>
+    <label>Auto-scan <input id="autoScan" type="checkbox"> every <input id="autoScanMin" type="number" value="5" min="1" max="60" style="width:54px">m</label>
+    <label>Paper gate <input type="number" value="82" disabled style="width:54px"></label>
+  </div>
+  <div class="controls" style="margin-top:8px">
+    <label>Risk/trade <input type="text" value="1%" disabled style="width:56px"></label>
+    <label>Stop <input type="text" value="ATR 1.2x · 3-8%" disabled style="width:130px"></label>
+    <label>TP1 <input type="text" value="2R / 50%" disabled style="width:88px"></label>
+    <label>Trail <input type="text" value="ATR 1.5x · min 8%" disabled style="width:134px"></label>
+    <label>Storage <input type="text" value="localStorage" disabled style="width:96px"></label>
+  </div>
+</header>
+
+<main>
+  <div class="metric-grid">
+    <div class="card"><div class="k">Total trades</div><div id="sTotal" class="v">0</div></div>
+    <div class="card"><div class="k">Open</div><div id="sOpen" class="v accent">0</div></div>
+    <div class="card"><div class="k">Win rate</div><div id="sWin" class="v">0%</div></div>
+    <div class="card"><div class="k">Paper PnL</div><div id="sPnl" class="v">0.00U</div></div>
+    <div class="card"><div class="k">Profit factor</div><div id="sPf" class="v">-</div></div>
+    <div class="card"><div class="k">Average R</div><div id="sR" class="v">0.00R</div></div>
+    <div class="card"><div class="k">Drawdown</div><div id="sGiveback" class="v">0.00%</div></div>
+    <div class="card"><div class="k">Candidates</div><div id="sCandidates" class="v">0</div></div>
+  </div>
+
+  <section>
+    <div class="section-head"><h2>Candidate Signals</h2><div id="signalSummary" class="summary">Waiting for scan</div></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th class="sym">Symbol</th><th>Score</th><th class="left">Strategy</th><th>Entry</th><th>Stop</th><th>TP1</th><th>Trail%</th><th>1H%</th><th>4H%</th><th>24H%</th><th>24H pos</th><th>Vol x</th><th class="left">Reasons</th>
+        </tr></thead>
+        <tbody id="signalsBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="cols2">
+    <section class="lower-section">
+      <div class="section-head"><h2>Paper Positions</h2><div id="positionSummary" class="summary">No open position</div></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th class="sym">Symbol</th><th class="left">Strategy</th><th>Entry</th><th>Last</th><th>Δ%</th><th>Unreal U</th><th>Stop</th><th>TP1</th><th>Qty</th><th>Remain</th><th>Risk U</th><th>Score</th><th>Opened</th><th class="left">Reason</th>
+          </tr></thead>
+          <tbody id="positionsBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="lower-section">
+      <div class="section-head"><h2>Backtest</h2><div id="backtestSummary" class="summary">No run yet</div></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th class="sym">Symbol</th><th>R</th><th>PnL U</th><th>Entry</th><th>Exit</th><th>MFE%</th><th>MAE%</th><th>Score</th><th class="left">Exit</th>
+          </tr></thead>
+          <tbody id="backtestBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <section class="trade-log-section">
+    <div class="section-head"><h2>Closed Paper Trades</h2><div id="tradeSummary" class="summary">No closed trade</div></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th class="sym">Symbol</th><th class="left">Strategy</th><th>Entry</th><th>Exit</th><th>R</th><th>PnL U</th><th>MFE%</th><th>MAE%</th><th>Score</th><th>Entry time</th><th>Exit time</th><th class="left">Reason</th>
+        </tr></thead>
+        <tbody id="tradesBody"></tbody>
+      </table>
+    </div>
+    <div id="log" class="status-box">Standalone mode · Binance public API · Taiwan time (UTC+8) · click symbol to open in TradingView.</div>
+  </section>
+</main>
+
+<script>
+const FAPI = 'https://fapi.binance.com';
+const INTERVAL_MS = { '15m': 900000 };
+const TZ = 'Asia/Taipei';
+const LABELS = {
+  strong_momentum_breakout: '強動量突破追價',
+  volume_ignition: '放量啟動追隨',
+  high_range_continuation: '高位續勢承接',
+  failed_breakout_watch: '假突破風險觀察',
+  narrative_momentum: '題材動量順勢'
+};
+const CFG = {
+  initialEquity: 10000,
+  riskPerTrade: 0.01,
+  maxPositions: 5,
+  maxTotalRisk: 0.05,
+  minQuoteVolume: 20000000,
+  minSignalScore: 70,
+  paperMinScore: 82,
+  maxHoldHours: 72,
+  cooldownBars: 4
+};
+let state = loadState();
+let autoScanTimer = null;
+
+function nowMs(){ return Date.now(); }
+function tw(ms){
+  if(!ms) return '';
+  return new Date(ms).toLocaleString('zh-TW', { timeZone:TZ, month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:false });
+}
+function twFull(ms){
+  if(!ms) return '';
+  return new Date(ms).toLocaleString('zh-TW', { timeZone:TZ, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
+}
+function tvHref(sym){ return `https://www.tradingview.com/chart/?symbol=BINANCE:${encodeURIComponent(sym)}.P`; }
+function fmt(n, d=4){ return n === null || n === undefined || n === '' ? '' : Number(n).toLocaleString(undefined, {maximumFractionDigits:d}); }
+function pct(a,b){ return !a || b === null || b === undefined ? null : (b / a - 1) * 100; }
+function safeDiv(a,b,def=0){ return !b || a === null || a === undefined ? def : a / b; }
+function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+function log(msg){ document.getElementById('log').textContent = msg; document.getElementById('statusLine').lastChild && updateStatusLine(msg.split('\n')[0]); }
+function updateStatusLine(text){
+  const el = document.getElementById('statusLine');
+  const dot = document.getElementById('runDot');
+  dot.className = 'run-dot' + (state.running ? ' on' : '');
+  // text node after dot
+  let textNode = el.childNodes[1];
+  if(!textNode || textNode.nodeType !== 3){
+    textNode = document.createTextNode('');
+    el.insertBefore(textNode, el.children[1] || null);
+  }
+  textNode.nodeValue = text;
+}
+function kOpen(k){ return Number(k[1]); }
+function kHigh(k){ return Number(k[2]); }
+function kLow(k){ return Number(k[3]); }
+function kClose(k){ return Number(k[4]); }
+function kVol(k){ return Number(k[5]); }
+function kTime(k){ return Number(k[0]); }
+function median(xs){ if(!xs.length) return 0; const a=[...xs].sort((x,y)=>x-y); const m=Math.floor(a.length/2); return a.length % 2 ? a[m] : (a[m-1]+a[m])/2; }
+function mean(xs){ return xs.length ? xs.reduce((a,b)=>a+b,0)/xs.length : 0; }
+
+function loadState(){
+  const raw = localStorage.getItem('lanaaiMomentumClaude');
+  if(raw){
+    try { return JSON.parse(raw); } catch {}
+  }
+  return { running:false, equity:CFG.initialEquity, peakEquity:CFG.initialEquity, pausedUntil:0, consecutiveLosses:0, signals:[], positions:[], trades:[], equityCurve:[], backtest:null, lastScanAt:0 };
+}
+function saveState(){ localStorage.setItem('lanaaiMomentumClaude', JSON.stringify(state)); paintAll(); }
+
+async function request(path, params={}){
+  const qs = new URLSearchParams(Object.entries(params).filter(([,v]) => v !== undefined && v !== null)).toString();
+  const res = await fetch(`${FAPI}${path}${qs ? '?' + qs : ''}`, { cache: 'no-store' });
+  if(!res.ok) throw new Error(`${path} ${res.status} ${res.statusText}`);
+  return await res.json();
+}
+async function exchangeInfo(){ return request('/fapi/v1/exchangeInfo'); }
+async function ticker24h(){ return request('/fapi/v1/ticker/24hr'); }
+async function klines(symbol, interval='15m', limit=500, startTime=null, endTime=null){
+  return request('/fapi/v1/klines', { symbol, interval, limit, startTime, endTime });
+}
+async function historicalKlines(symbol, interval, startMs, endMs){
+  const out = [];
+  let cursor = startMs;
+  while(cursor < endMs){
+    const batch = await klines(symbol, interval, 1500, cursor, endMs);
+    if(!batch.length) break;
+    out.push(...batch);
+    const next = Number(batch[batch.length - 1][0]) + INTERVAL_MS[interval];
+    if(next <= cursor) break;
+    cursor = next;
+    if(batch.length < 1500) break;
+    await sleep(35);
+  }
+  const map = new Map(out.map(k => [Number(k[0]), k]));
+  return [...map.keys()].sort((a,b)=>a-b).map(t => map.get(t));
+}
+function closedKlines(rows){
+  if(!rows.length) return [];
+  const currentOpen = Math.floor(nowMs() / INTERVAL_MS['15m']) * INTERVAL_MS['15m'];
+  return Number(rows[rows.length - 1][0]) >= currentOpen ? rows.slice(0, -1) : rows.slice();
+}
+async function topSymbols(limit){
+  const [info, tickers] = await Promise.all([exchangeInfo(), ticker24h()]);
+  const tradable = new Set(info.symbols.filter(s => s.status === 'TRADING' && s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT' && s.marginAsset === 'USDT').map(s => s.symbol));
+  return tickers
+    .map(t => ({...t, quoteVolumeFloat:Number(t.quoteVolume || 0)}))
+    .filter(t => tradable.has(t.symbol) && t.quoteVolumeFloat >= CFG.minQuoteVolume)
+    .sort((a,b) => b.quoteVolumeFloat - a.quoteVolumeFloat)
+    .slice(0, limit);
+}
+
+function atrPct(rows, period=14){
+  if(rows.length < period + 1) return 4;
+  const sub = rows.slice(-(period + 1));
+  const trs = [];
+  for(let i=1;i<sub.length;i++){
+    const prevClose = kClose(sub[i-1]);
+    trs.push(Math.max(kHigh(sub[i]) - kLow(sub[i]), Math.abs(kHigh(sub[i]) - prevClose), Math.abs(kLow(sub[i]) - prevClose)));
+  }
+  return safeDiv(mean(trs), kClose(rows[rows.length-1]), 0.04) * 100;
+}
+function rangePosition(price, lows, highs){
+  const lo = Math.min(...lows), hi = Math.max(...highs);
+  return hi === lo ? 0.5 : (price - lo) / (hi - lo);
+}
+function btcRiskOff(rows){
+  const c = closedKlines(rows);
+  if(c.length < 17) return false;
+  const last = kClose(c[c.length-1]);
+  const oneH = pct(kClose(c[c.length-5]), last) || 0;
+  const fourH = pct(kClose(c[c.length-17]), last) || 0;
+  return oneH <= -1.5 && fourH <= -3;
+}
+function buildRisk(entry, atrValue){
+  const stopPct = Math.max(3, Math.min(8, 1.2 * atrValue));
+  const stop = entry * (1 - stopPct / 100);
+  const tp1 = entry + 2 * (entry - stop);
+  const trailPct = Math.max(8, 1.5 * atrValue);
+  return { stop, tp1, trailPct, stopPct };
+}
+function strategyKey(m){
+  if((m.momentum4h >= 15 && m.position24h >= 0.80) || (m.momentum24h >= 20 && m.distancePrevHigh >= -2)) return 'strong_momentum_breakout';
+  if(m.momentum24h >= 8 && m.position24h >= 0.75 && m.momentum4h >= -3 && m.momentum4h <= 8) return 'high_range_continuation';
+  if(m.volumeRatio >= 2 && m.position24h >= 0.65 && m.momentum1h > -1) return 'volume_ignition';
+  return 'narrative_momentum';
+}
+function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=false, minScore=CFG.minSignalScore){
+  const c = closedKlines(rows);
+  if(c.length < 110 || quoteVolume < CFG.minQuoteVolume) return null;
+  const price = kClose(c[c.length-1]);
+  const prev1h = kClose(c[c.length-5]);
+  const prev4h = kClose(c[c.length-17]);
+  const prev24h = kClose(c[c.length-97]);
+  const last24h = c.slice(-96);
+  const prev24hBars = c.slice(-97,-1);
+  const prevHigh = Math.max(...prev24hBars.map(kHigh));
+  const momentum1h = pct(prev1h, price) || 0;
+  const momentum4h = pct(prev4h, price) || 0;
+  const momentum24h = pct(prev24h, price) || 0;
+  const position24h = rangePosition(price, last24h.map(kLow), last24h.map(kHigh));
+  const distancePrevHigh = pct(prevHigh, price) || 0;
+  const volumeRatio = safeDiv(kVol(c[c.length-1]), median(c.slice(-5,-1).map(kVol)), 0);
+  const atrValue = atrPct(c);
+  const risk = buildRisk(price, atrValue);
+  let score = 10;
+  const reasons = [`24h quote volume ${Math.round(quoteVolume).toLocaleString()} USDT`];
+  if(momentum4h >= 4 || momentum24h >= 8){ score += 20; reasons.push(`momentum confirmed: 4h ${momentum4h.toFixed(2)}%, 24h ${momentum24h.toFixed(2)}%`); }
+  if(momentum4h >= 8){ score += 8; reasons.push(`strong 4h momentum ${momentum4h.toFixed(2)}%`); }
+  if(momentum24h >= 15){ score += 8; reasons.push(`strong 24h momentum ${momentum24h.toFixed(2)}%`); }
+  if(momentum1h > 0){ score += 5; reasons.push(`1h still positive ${momentum1h.toFixed(2)}%`); }
+  if(position24h >= 0.75){ score += 20; reasons.push(`price in top ${(position24h*100).toFixed(1)}% of 24h range`); }
+  if(distancePrevHigh >= -4){ score += 10; reasons.push(`within ${Math.abs(distancePrevHigh).toFixed(2)}% of prior 24h high`); }
+  if(distancePrevHigh > 0){ score += 5; reasons.push('breaking prior 24h high'); }
+  if(volumeRatio >= 1.5){ score += 20; reasons.push(`15m volume expansion ${volumeRatio.toFixed(2)}x`); }
+  if(volumeRatio >= 3){ score += 5; reasons.push('volume expansion is unusually strong'); }
+  if(momentum1h <= 18){ score += 10; reasons.push('not a one-candle runaway move'); } else { score -= 15; reasons.push(`1h move ${momentum1h.toFixed(2)}% is overheated`); }
+  if(riskOff){ score -= 12; reasons.push('BTC context risk-off penalty'); }
+  score = Math.round(clamp(score, 0, 100));
+  if(score < minScore) return null;
+  const metrics = { momentum1h, momentum4h, momentum24h, position24h, distancePrevHigh, volumeRatio, atrPct:atrValue, stopPct:risk.stopPct, btcRiskOff:riskOff, lastKlineOpenTime:kTime(c[c.length-1]) };
+  const key = strategyKey(metrics);
+  return { scannedAt, symbol, score, strategyKey:key, strategyLabel:LABELS[key], entry:price, stop:risk.stop, tp1:risk.tp1, trailPct:risk.trailPct, atrPct:atrValue, quoteVolume, reasons, metrics };
+}
+
+async function scanSignals(){
+  try {
+    const limit = Number(document.getElementById('scanLimit').value || 80);
+    const minScore = Number(document.getElementById('minScore').value || 70);
+    log('Scanning Binance USD-M futures...');
+    const tickers = await topSymbols(limit);
+    const btcRows = await klines('BTCUSDT', '15m', 130);
+    const riskOff = btcRiskOff(btcRows);
+    const signals = [];
+    for(let i=0;i<tickers.length;i++){
+      const t = tickers[i];
+      log(`Scanning ${i+1}/${tickers.length}: ${t.symbol}`);
+      try {
+        const rows = await klines(t.symbol, '15m', 130);
+        const sig = evaluateSignal(t.symbol, rows, t.quoteVolumeFloat, nowMs(), riskOff, minScore);
+        if(sig) signals.push(sig);
+      } catch(e) {
+        console.warn(t.symbol, e);
+      }
+      await sleep(25);
+    }
+    signals.sort((a,b) => b.score - a.score || b.quoteVolume - a.quoteVolume);
+    state.signals = signals;
+    state.lastScanAt = nowMs();
+    saveState();
+    log(`Scan complete · ${signals.length} signals · ${tw(state.lastScanAt)}`);
+    return signals;
+  } catch(e) {
+    log(`Scan failed: ${e.message}\nIf opened from file://, Binance CORS or regional access may still block the browser request.`);
+    throw e;
+  }
+}
+function positionSize(equity, entry, stop){
+  const riskUsdt = equity * CFG.riskPerTrade;
+  const perUnitRisk = Math.max(entry - stop, entry * 0.001);
+  return { qty: riskUsdt / perUnitRisk, riskUsdt };
+}
+function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
+  if(entryIndex >= rows.length) return null;
+  const entryBar = rows[entryIndex];
+  const entry = kOpen(entryBar);
+  const atrValue = atrPct(rows.slice(Math.max(0, entryIndex - 100), entryIndex));
+  const risk = buildRisk(entry, atrValue);
+  const originalStop = risk.stop;
+  const sized = positionSize(equity, entry, risk.stop);
+  let remainingQty = sized.qty, realized = 0, tp1Done = false, stop = risk.stop;
+  let highest = entry, lowest = entry, mfe = 0, mae = 0;
+  const lastIndex = Math.min(rows.length - 1, entryIndex + Math.floor(CFG.maxHoldHours * 60 / 15));
+  let exit = kClose(rows[lastIndex]), exitTime = kTime(rows[lastIndex]), reason = 'time_exit';
+  for(let i=entryIndex;i<=lastIndex;i++){
+    const bar = rows[i], high = kHigh(bar), low = kLow(bar), close = kClose(bar);
+    highest = Math.max(highest, high); lowest = Math.min(lowest, low);
+    mfe = Math.max(mfe, pct(entry, high) || 0); mae = Math.min(mae, pct(entry, low) || 0);
+    const effectiveStop = tp1Done ? Math.max(entry, highest * (1 - risk.trailPct / 100)) : stop;
+    if(low <= effectiveStop){
+      exit = effectiveStop; exitTime = kTime(bar); realized += remainingQty * (exit - entry); reason = tp1Done ? 'trail_stop' : 'stop'; break;
+    }
+    if(!tp1Done && high >= risk.tp1){
+      const sellQty = remainingQty * 0.5;
+      realized += sellQty * (risk.tp1 - entry);
+      remainingQty -= sellQty;
+      tp1Done = true;
+      stop = entry;
+    }
+    if(i === lastIndex){ exit = close; exitTime = kTime(bar); realized += remainingQty * (exit - entry); }
+  }
+  return { symbol, strategyKey, strategyLabel:LABELS[strategyKey], entryTime:kTime(entryBar), exitTime, entry, exit, qty:sized.qty, pnl:realized, rMultiple:safeDiv(realized, sized.riskUsdt, 0), reason, mfePct:mfe, maePct:mae, score, stop:originalStop, tp1:risk.tp1 };
+}
+function findIndex(rows, timeMs){ const i = rows.findIndex(k => kTime(k) >= timeMs); return i < 0 ? rows.length - 1 : i; }
+function summarize(trades){
+  let equity = CFG.initialEquity, peak = equity, maxDd = 0, gp = 0, gl = 0, wins = 0;
+  [...trades].sort((a,b)=>a.exitTime-b.exitTime).forEach(t => {
+    equity += t.pnl; peak = Math.max(peak, equity); maxDd = Math.max(maxDd, safeDiv(peak-equity, peak, 0)*100);
+    if(t.pnl >= 0){ gp += t.pnl; wins++; } else gl += Math.abs(t.pnl);
+  });
+  return { initialEquity:CFG.initialEquity, endingEquity:equity, netPnl:equity-CFG.initialEquity, netReturnPct:pct(CFG.initialEquity, equity)||0, tradeCount:trades.length, winRatePct:safeDiv(wins, trades.length, 0)*100, profitFactor:safeDiv(gp, gl, gp || 0), maxDrawdownPct:maxDd, avgR: trades.length ? mean(trades.map(t=>t.rMultiple)) : 0 };
+}
+function applyPortfolio(trades){
+  const selected = [], active = [], activeSymbols = new Map();
+  let equity = CFG.initialEquity, peak = equity, consecutive = 0, pausedUntil = 0;
+  trades.sort((a,b)=>a.entryTime-b.entryTime);
+  for(const t of trades){
+    while(active.length && active[0] <= t.entryTime) active.shift();
+    for(const [sym, exit] of [...activeSymbols.entries()]) if(exit <= t.entryTime) activeSymbols.delete(sym);
+    if(t.entryTime < pausedUntil || active.length >= CFG.maxPositions || activeSymbols.has(t.symbol)) continue;
+    if(safeDiv(peak-equity, peak, 0) >= 0.12) break;
+    selected.push(t); active.push(t.exitTime); active.sort((a,b)=>a-b); activeSymbols.set(t.symbol, t.exitTime);
+    equity += t.pnl; peak = Math.max(peak, equity);
+    if(t.pnl < 0){ consecutive++; if(consecutive >= 3){ pausedUntil = t.exitTime + 6*60*60*1000; consecutive = 0; } } else consecutive = 0;
+  }
+  return selected;
+}
+async function runBacktest(){
+  try {
+    const days = Number(document.getElementById('days').value || 30);
+    const minScore = Number(document.getElementById('minScore').value || 70);
+    const universe = Number(document.getElementById('universe').value || 30);
+    const end = nowMs(), start = end - (days + 2) * 24*60*60*1000;
+    log(`Backtest loading universe...`);
+    const tickers = await topSymbols(universe);
+    const btc = await historicalKlines('BTCUSDT', '15m', start, end);
+    const candidates = [];
+    for(let s=0;s<tickers.length;s++){
+      const t = tickers[s];
+      log(`Backtest ${s+1}/${tickers.length}: ${t.symbol}`);
+      let rows;
+      try { rows = await historicalKlines(t.symbol, '15m', start, end); } catch(e){ console.warn(e); continue; }
+      if(rows.length < 140) continue;
+      let i = 110;
+      while(i < rows.length - 2){
+        const barTime = kTime(rows[i]);
+        if(barTime < end - days*24*60*60*1000){ i++; continue; }
+        const riskOff = btcRiskOff(btc.filter(k => kTime(k) <= barTime));
+        const sig = evaluateSignal(t.symbol, rows.slice(0, i + 1), t.quoteVolumeFloat, barTime, riskOff, minScore);
+        if(sig && sig.score >= minScore){
+          const trade = simulateTrade(t.symbol, sig.strategyKey, sig.score, rows, i + 1, CFG.initialEquity);
+          if(trade){ candidates.push(trade); i = Math.max(i + 1, findIndex(rows, trade.exitTime) + CFG.cooldownBars); continue; }
+        }
+        i++;
+      }
+      await sleep(35);
+    }
+    const trades = applyPortfolio(candidates);
+    state.backtest = { summary:summarize(trades), trades, runAt:nowMs(), days, minScore };
+    saveState();
+    log(`Backtest complete · ${trades.length} trades · ${tw(state.backtest.runAt)}`);
+  } catch(e) {
+    log(`Backtest failed: ${e.message}`);
+  }
+}
+
+async function startPaper(){ state.running = true; saveState(); await paperTick(); }
+function stopPaper(){ state.running = false; saveState(); }
+function resetPaper(){
+  if(!confirm('確定要重置 paper trading？所有未平倉與紀錄會清空。')) return;
+  state.running = false; state.equity = CFG.initialEquity; state.peakEquity = CFG.initialEquity;
+  state.pausedUntil = 0; state.consecutiveLosses = 0; state.positions = []; state.trades = []; state.equityCurve = [];
+  saveState();
+}
+async function paperTick(){
+  if(!state.running) return;
+  await updatePositions();
+  if(state.pausedUntil && nowMs() < state.pausedUntil){ saveState(); return; }
+  if(!state.signals.length || nowMs() - state.lastScanAt > 3*60*1000) await scanSignals();
+  const openSymbols = new Set(state.positions.map(p => p.symbol));
+  let totalRisk = state.positions.reduce((a,p)=>a+p.riskUsdt,0);
+  for(const sig of state.signals){
+    if(state.positions.length >= CFG.maxPositions) break;
+    if(openSymbols.has(sig.symbol) || sig.score < CFG.paperMinScore) continue;
+    const sized = positionSize(state.equity, sig.entry, sig.stop);
+    if(totalRisk + sized.riskUsdt > state.equity * CFG.maxTotalRisk) break;
+    state.positions.push({ id:`p_${nowMs()}_${sig.symbol}`, symbol:sig.symbol, strategyKey:sig.strategyKey, strategyLabel:sig.strategyLabel, entryTime:nowMs(), lastTime:nowMs(), entry:sig.entry, last:sig.entry, qty:sized.qty, remainingQty:sized.qty, stop:sig.stop, originalStop:sig.stop, tp1:sig.tp1, tp1Done:false, trailPct:sig.trailPct, highest:sig.entry, lowest:sig.entry, score:sig.score, riskUsdt:sized.riskUsdt, realizedPnl:0, reasons:sig.reasons });
+    totalRisk += sized.riskUsdt; openSymbols.add(sig.symbol);
+  }
+  saveState();
+}
+async function updatePositions(){
+  const stillOpen = [];
+  for(const p of state.positions){
+    let closed = false;
+    try {
+      const rows = closedKlines(await klines(p.symbol, '15m', 300, p.lastTime - INTERVAL_MS['15m']));
+      for(const bar of rows){
+        if(kTime(bar) <= p.lastTime) continue;
+        p.lastTime = kTime(bar);
+        const high = kHigh(bar), low = kLow(bar), close = kClose(bar);
+        p.highest = Math.max(p.highest, high); p.lowest = Math.min(p.lowest, low);
+        p.last = close;
+        const effectiveStop = p.tp1Done ? Math.max(p.entry, p.highest * (1 - p.trailPct/100)) : p.stop;
+        let exit = null, reason = '';
+        if(low <= effectiveStop){ exit = effectiveStop; reason = p.tp1Done ? 'trail_stop' : 'stop'; }
+        else if(!p.tp1Done && high >= p.tp1){
+          const sellQty = p.remainingQty * 0.5;
+          const tpPnl = sellQty * (p.tp1 - p.entry);
+          state.equity += tpPnl;
+          state.peakEquity = Math.max(state.peakEquity, state.equity);
+          p.realizedPnl = (p.realizedPnl || 0) + tpPnl;
+          p.remainingQty -= sellQty; p.tp1Done = true; p.stop = p.entry;
+        } else if(kTime(bar) >= p.entryTime + CFG.maxHoldHours*60*60*1000){ exit = close; reason = 'time_exit'; }
+        if(exit !== null){
+          const exitPnl = p.remainingQty * (exit - p.entry);
+          const totalPnl = (p.realizedPnl || 0) + exitPnl;
+          state.equity += exitPnl; state.peakEquity = Math.max(state.peakEquity, state.equity);
+          const trade = { symbol:p.symbol, strategyKey:p.strategyKey, strategyLabel:p.strategyLabel, entryTime:p.entryTime, exitTime:kTime(bar), entry:p.entry, exit, qty:p.qty, pnl:totalPnl, rMultiple:safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct:pct(p.entry,p.highest)||0, maePct:pct(p.entry,p.lowest)||0, score:p.score };
+          state.trades.unshift(trade);
+          state.equityCurve.push({ timeMs:kTime(bar), equity:state.equity, drawdownPct:safeDiv(state.peakEquity-state.equity, state.peakEquity, 0)*100 });
+          state.consecutiveLosses = totalPnl < 0 ? state.consecutiveLosses + 1 : 0;
+          if(state.consecutiveLosses >= 3){ state.pausedUntil = nowMs() + 6*60*60*1000; state.consecutiveLosses = 0; }
+          if(safeDiv(state.peakEquity-state.equity, state.peakEquity, 0) >= 0.12) state.running = false;
+          closed = true; break;
+        }
+      }
+    } catch(e){ console.warn(e); }
+    if(!closed) stillOpen.push(p);
+  }
+  state.positions = stillOpen;
+  saveState();
+}
+
+async function refreshMarks(){
+  if(!state.positions.length) return;
+  try {
+    const prices = await Promise.all(state.positions.map(p =>
+      request('/fapi/v1/ticker/price', { symbol:p.symbol }).then(r => Number(r.price)).catch(() => null)
+    ));
+    let updated = false;
+    state.positions.forEach((p, i) => {
+      if(prices[i] && Number.isFinite(prices[i])){ p.last = prices[i]; updated = true; }
+    });
+    if(updated) paintAll();
+  } catch(e){ console.warn('mark refresh', e); }
+}
+
+function htmlEscape(v){ return String(v ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+function signedClass(v){ return !Number.isFinite(Number(v)) ? '' : Number(v) >= 0 ? 'pos' : 'neg'; }
+function showPct(v,d=2){ return Number.isFinite(Number(v)) ? `${fmt(v,d)}%` : '-'; }
+function metric(id, value, klass=''){ const el = document.getElementById(id); if(el){ el.textContent = value; el.className = `v ${klass}`.trim(); } }
+function symLink(sym){ return `<a class="sym-link" href="${tvHref(sym)}" target="_blank" rel="noopener noreferrer" title="Open ${htmlEscape(sym)} on TradingView"><strong>${htmlEscape(sym)}</strong></a>`; }
+function statsFromTrades(trades){
+  let gp = 0, gl = 0, wins = 0, r = 0, pnl = 0;
+  trades.forEach(t => { const p = Number(t.pnl || 0), rr = Number(t.rMultiple || 0); pnl += p; r += rr; if(p >= 0){ gp += p; wins++; } else gl += Math.abs(p); });
+  return { count:trades.length, pnl, win:trades.length ? wins / trades.length * 100 : 0, pf:gl ? gp / gl : (gp ? gp : 0), avgR:trades.length ? r / trades.length : 0 };
+}
+function unrealizedFor(p){
+  if(!p.last || !p.entry) return { pnl:null, pct:null };
+  const pnl = (p.remainingQty || p.qty) * (p.last - p.entry) + (p.realizedPnl || 0);
+  return { pnl, pct: pct(p.entry, p.last) };
+}
+function drawSpark(){
+  const svg = document.getElementById('equitySpark');
+  if(!svg) return;
+  const seed = [{ equity:CFG.initialEquity }];
+  const curve = state.equityCurve || [];
+  const tail = [{ equity:state.equity }];
+  const all = [...seed, ...curve, ...tail].map(p => Number(p.equity));
+  if(all.length < 2 || all.every(v => v === all[0])){
+    svg.innerHTML = `<line x1="2" y1="12" x2="118" y2="12" stroke="var(--border)" stroke-width="1" stroke-dasharray="2 2"/>`;
+    return;
+  }
+  const w = 120, h = 24, pad = 2;
+  const min = Math.min(...all), max = Math.max(...all), range = max - min || 1;
+  const xs = all.map((_, i) => pad + i * (w - pad*2) / (all.length - 1));
+  const ys = all.map(v => h - pad - (v - min) / range * (h - pad*2));
+  const path = xs.map((x, i) => `${i===0?'M':'L'}${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ');
+  const fillPath = `${path} L${xs[xs.length-1].toFixed(1)},${(h-pad).toFixed(1)} L${xs[0].toFixed(1)},${(h-pad).toFixed(1)} Z`;
+  const last = all[all.length-1], first = all[0];
+  const up = last >= first;
+  const stroke = up ? 'var(--green)' : 'var(--red)';
+  const fill = up ? 'rgba(123,174,113,.18)' : 'rgba(217,117,106,.18)';
+  svg.innerHTML = `<path d="${fillPath}" fill="${fill}" stroke="none"/><path d="${path}" fill="none" stroke="${stroke}" stroke-width="1.5" stroke-linejoin="round"/>`;
+}
+function paintAll(){
+  const bt = state.backtest;
+  const paperStats = statsFromTrades(state.trades || []);
+  const drawdown = safeDiv(state.peakEquity - state.equity, state.peakEquity, 0) * 100;
+  const paperPnl = state.equity - CFG.initialEquity;
+  metric('sTotal', String(paperStats.count || bt?.summary?.tradeCount || 0));
+  metric('sOpen', String(state.positions.length), 'accent');
+  metric('sWin', showPct(paperStats.count ? paperStats.win : bt?.summary?.winRatePct || 0));
+  metric('sPnl', `${fmt(paperPnl,2)}U`, signedClass(paperPnl));
+  metric('sPf', fmt(paperStats.count ? paperStats.pf : bt?.summary?.profitFactor || 0, 2));
+  metric('sR', `${fmt(paperStats.count ? paperStats.avgR : bt?.summary?.avgR || 0, 2)}R`, signedClass(paperStats.count ? paperStats.avgR : bt?.summary?.avgR || 0));
+  metric('sGiveback', showPct(drawdown));
+  metric('sCandidates', String(state.signals.length), state.signals.length ? 'blue' : '');
+
+  const signalSummary = document.getElementById('signalSummary');
+  if(signalSummary) signalSummary.textContent = `${state.signals.length} candidates · last scan ${state.lastScanAt ? tw(state.lastScanAt) : 'never'}`;
+  document.getElementById('signalsBody').innerHTML = state.signals.length ? state.signals.map(s => {
+    const m = s.metrics || {};
+    const scoreClass = s.score >= 85 ? 'pill high' : 'pill live';
+    return `<tr><td class="sym">${symLink(s.symbol)}</td><td><span class="${scoreClass}">${fmt(s.score,0)}</span></td><td class="left">${htmlEscape(s.strategyLabel || s.strategyKey)}</td><td>${fmt(s.entry,8)}</td><td class="neg">${fmt(s.stop,8)}</td><td class="pos">${fmt(s.tp1,8)}</td><td>${showPct(s.trailPct)}</td><td class="${signedClass(m.momentum1h)}">${showPct(m.momentum1h)}</td><td class="${signedClass(m.momentum4h)}">${showPct(m.momentum4h)}</td><td class="${signedClass(m.momentum24h)}">${showPct(m.momentum24h)}</td><td>${showPct((m.position24h || 0) * 100)}</td><td>${fmt(m.volumeRatio,2)}x</td><td class="reason">${htmlEscape((s.reasons||[]).slice(0,4).join(' · '))}</td></tr>`;
+  }).join('') : '<tr><td class="sym muted" colspan="13">No signals</td></tr>';
+
+  document.getElementById('backtestSummary').innerHTML = bt ? `Trades ${bt.summary.tradeCount} · Win ${fmt(bt.summary.winRatePct,2)}% · PF ${fmt(bt.summary.profitFactor,2)} · Return ${fmt(bt.summary.netReturnPct,2)}% · Max DD ${fmt(bt.summary.maxDrawdownPct,2)}% · ${tw(bt.runAt)}` : 'No run yet';
+  document.getElementById('backtestBody').innerHTML = bt && bt.trades.length ? bt.trades.slice(-80).reverse().map(t => `<tr><td class="sym">${symLink(t.symbol)}</td><td class="${signedClass(t.rMultiple)}">${fmt(t.rMultiple,2)}</td><td class="${signedClass(t.pnl)}">${fmt(t.pnl,2)}</td><td>${fmt(t.entry,8)}</td><td>${fmt(t.exit,8)}</td><td class="pos">${showPct(t.mfePct)}</td><td class="neg">${showPct(t.maePct)}</td><td>${fmt(t.score,0)}</td><td class="left">${htmlEscape(t.reason)}</td></tr>`).join('') : '<tr><td class="sym muted" colspan="9">No backtest trades</td></tr>';
+
+  const totalUnreal = state.positions.reduce((a,p) => a + (unrealizedFor(p).pnl || 0), 0);
+  document.getElementById('positionSummary').innerHTML = `${state.positions.length} open · equity <strong>${fmt(state.equity,2)}U</strong> · unreal <span class="${signedClass(totalUnreal)}">${fmt(totalUnreal,2)}U</span> · DD ${fmt(drawdown,2)}%`;
+  document.getElementById('positionsBody').innerHTML = state.positions.length ? state.positions.map(p => {
+    const u = unrealizedFor(p);
+    const lastCell = p.last ? fmt(p.last,8) : '<span class="muted">—</span>';
+    const pctCell = u.pct === null ? '<span class="muted">—</span>' : `<span class="${signedClass(u.pct)}">${showPct(u.pct)}</span>`;
+    const pnlCell = u.pnl === null ? '<span class="muted">—</span>' : `<span class="${signedClass(u.pnl)}">${fmt(u.pnl,2)}</span>`;
+    return `<tr><td class="sym">${symLink(p.symbol)}</td><td class="left">${htmlEscape(p.strategyLabel || p.strategyKey)}</td><td>${fmt(p.entry,8)}</td><td>${lastCell}</td><td>${pctCell}</td><td>${pnlCell}</td><td class="neg">${fmt(p.stop,8)}</td><td class="pos">${fmt(p.tp1,8)}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.remainingQty,4)}</td><td>${fmt(p.riskUsdt,2)}</td><td>${fmt(p.score,0)}</td><td>${tw(p.entryTime)}</td><td class="reason">${htmlEscape((p.reasons||[]).slice(0,3).join(' · '))}</td></tr>`;
+  }).join('') : '<tr><td class="sym muted" colspan="14">No open position</td></tr>';
+
+  document.getElementById('tradeSummary').textContent = `${state.trades.length} closed paper trades`;
+  document.getElementById('tradesBody').innerHTML = state.trades.length ? state.trades.slice(0,100).map(t => `<tr><td class="sym">${symLink(t.symbol)}</td><td class="left">${htmlEscape(t.strategyLabel || t.strategyKey)}</td><td>${fmt(t.entry,8)}</td><td>${fmt(t.exit,8)}</td><td class="${signedClass(t.rMultiple)}">${fmt(t.rMultiple,2)}</td><td class="${signedClass(t.pnl)}">${fmt(t.pnl,2)}</td><td class="pos">${showPct(t.mfePct)}</td><td class="neg">${showPct(t.maePct)}</td><td>${fmt(t.score,0)}</td><td>${tw(t.entryTime)}</td><td>${tw(t.exitTime)}</td><td class="left">${htmlEscape(t.reason)}</td></tr>`).join('') : '<tr><td class="sym muted" colspan="12">No closed paper trade</td></tr>';
+
+  drawSpark();
+  updateStatusLine(state.running ? `Paper running · ${state.positions.length} open · ${tw(nowMs())}` : `Ready · ${tw(nowMs())}`);
+}
+function csvValue(v){ if(v === null || v === undefined) return ''; const s = typeof v === 'object' ? JSON.stringify(v) : String(v); return /[",\n]/.test(s) ? `"${s.replaceAll('"','""')}"` : s; }
+function downloadCsv(name, rows){
+  if(!rows.length){ log('Nothing to download.'); return; }
+  const keys = Object.keys(rows[0]);
+  const text = [keys.join(','), ...rows.map(r => keys.map(k => csvValue(r[k])).join(','))].join('\n');
+  const blob = new Blob(["﻿" + text], {type:'text/csv;charset=utf-8'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); URL.revokeObjectURL(a.href);
+}
+function downloadSignals(){ downloadCsv('signals_latest.csv', state.signals); }
+function downloadBacktest(){ downloadCsv('backtest_trades.csv', state.backtest ? state.backtest.trades : []); }
+function downloadPaper(){ downloadCsv('paper_trades.csv', state.trades); }
+
+function setupAutoScan(){
+  const cb = document.getElementById('autoScan');
+  const minIn = document.getElementById('autoScanMin');
+  const apply = () => {
+    if(autoScanTimer){ clearInterval(autoScanTimer); autoScanTimer = null; }
+    if(cb.checked){
+      const mins = clamp(Number(minIn.value || 5), 1, 60);
+      autoScanTimer = setInterval(() => { scanSignals().catch(()=>{}); }, mins * 60 * 1000);
+      log(`Auto-scan enabled · every ${mins} min`);
+    } else {
+      log('Auto-scan disabled');
+    }
+  };
+  cb.addEventListener('change', apply);
+  minIn.addEventListener('change', () => { if(cb.checked) apply(); });
+}
+
+paintAll();
+setupAutoScan();
+setInterval(() => { if(state.running) paperTick(); }, 60000);
+setInterval(refreshMarks, 15000);
+setInterval(() => { if(state.positions.length || state.running) drawSpark(), updateStatusLine(state.running ? `Paper running · ${state.positions.length} open · ${tw(nowMs())}` : `Ready · ${tw(nowMs())}`); }, 30000);
+</script>
+</body>
+</html>
