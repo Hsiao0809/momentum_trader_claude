@@ -123,7 +123,7 @@
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th class="sym">Symbol</th><th>Score</th><th class="left">Strategy</th><th>Entry</th><th>Stop</th><th>TP1</th><th>Trail%</th><th>1H%</th><th>4H%</th><th>24H%</th><th>24H pos</th><th>Vol x</th><th class="left">Reasons</th>
+          <th class="sym">Symbol</th><th>Score</th><th class="left">Strategy</th><th>Entry</th><th>現價</th><th>Δ%</th><th>Stop</th><th>TP1</th><th>Trail%</th><th>1H%</th><th>4H%</th><th>24H%</th><th>24H pos</th><th>Vol x</th><th class="left">Reasons</th>
         </tr></thead>
         <tbody id="signalsBody"></tbody>
       </table>
@@ -555,6 +555,20 @@ async function updatePositions(){
   saveState();
 }
 
+async function refreshSignalPrices(){
+  if(!state.signals.length) return;
+  try {
+    const prices = await Promise.all(state.signals.map(s =>
+      request('/fapi/v1/ticker/price', { symbol:s.symbol }).then(r => Number(r.price)).catch(() => null)
+    ));
+    let updated = false;
+    state.signals.forEach((s, i) => {
+      if(prices[i] && Number.isFinite(prices[i])){ s.lastPrice = prices[i]; updated = true; }
+    });
+    if(updated) paintAll();
+  } catch(e){ console.warn('signal price refresh', e); }
+}
+
 async function refreshMarks(){
   if(!state.positions.length) return;
   try {
@@ -626,8 +640,12 @@ function paintAll(){
   document.getElementById('signalsBody').innerHTML = state.signals.length ? state.signals.map(s => {
     const m = s.metrics || {};
     const scoreClass = s.score >= 85 ? 'pill high' : 'pill live';
-    return `<tr><td class="sym">${symLink(s.symbol)}</td><td><span class="${scoreClass}">${fmt(s.score,0)}</span></td><td class="left">${htmlEscape(s.strategyLabel || s.strategyKey)}</td><td>${fmt(s.entry,8)}</td><td class="neg">${fmt(s.stop,8)}</td><td class="pos">${fmt(s.tp1,8)}</td><td>${showPct(s.trailPct)}</td><td class="${signedClass(m.momentum1h)}">${showPct(m.momentum1h)}</td><td class="${signedClass(m.momentum4h)}">${showPct(m.momentum4h)}</td><td class="${signedClass(m.momentum24h)}">${showPct(m.momentum24h)}</td><td>${showPct((m.position24h || 0) * 100)}</td><td>${fmt(m.volumeRatio,2)}x</td><td class="reason">${htmlEscape((s.reasons||[]).slice(0,4).join(' · '))}</td></tr>`;
-  }).join('') : '<tr><td class="sym muted" colspan="13">No signals</td></tr>';
+    const lastP = s.lastPrice;
+    const delta = lastP ? pct(s.entry, lastP) : null;
+    const lastPriceCell = lastP ? fmt(lastP,8) : '<span class="muted">—</span>';
+    const deltaCell = delta !== null ? `<span class="${signedClass(delta)}">${showPct(delta)}</span>` : '<span class="muted">—</span>';
+    return `<tr><td class="sym">${symLink(s.symbol)}</td><td><span class="${scoreClass}">${fmt(s.score,0)}</span></td><td class="left">${htmlEscape(s.strategyLabel || s.strategyKey)}</td><td>${fmt(s.entry,8)}</td><td>${lastPriceCell}</td><td>${deltaCell}</td><td class="neg">${fmt(s.stop,8)}</td><td class="pos">${fmt(s.tp1,8)}</td><td>${showPct(s.trailPct)}</td><td class="${signedClass(m.momentum1h)}">${showPct(m.momentum1h)}</td><td class="${signedClass(m.momentum4h)}">${showPct(m.momentum4h)}</td><td class="${signedClass(m.momentum24h)}">${showPct(m.momentum24h)}</td><td>${showPct((m.position24h || 0) * 100)}</td><td>${fmt(m.volumeRatio,2)}x</td><td class="reason">${htmlEscape((s.reasons||[]).slice(0,4).join(' · '))}</td></tr>`;
+  }).join('') : '<tr><td class="sym muted" colspan="15">No signals</td></tr>';
 
   document.getElementById('backtestSummary').innerHTML = bt ? `Trades ${bt.summary.tradeCount} · Win ${fmt(bt.summary.winRatePct,2)}% · PF ${fmt(bt.summary.profitFactor,2)} · Return ${fmt(bt.summary.netReturnPct,2)}% · Max DD ${fmt(bt.summary.maxDrawdownPct,2)}% · ${tw(bt.runAt)}` : 'No run yet';
   document.getElementById('backtestBody').innerHTML = bt && bt.trades.length ? bt.trades.slice(-80).reverse().map(t => `<tr><td class="sym">${symLink(t.symbol)}</td><td class="${signedClass(t.rMultiple)}">${fmt(t.rMultiple,2)}</td><td class="${signedClass(t.pnl)}">${fmt(t.pnl,2)}</td><td>${fmt(t.entry,8)}</td><td>${fmt(t.exit,8)}</td><td class="pos">${showPct(t.mfePct)}</td><td class="neg">${showPct(t.maePct)}</td><td>${fmt(t.score,0)}</td><td class="left">${htmlEscape(t.reason)}</td></tr>`).join('') : '<tr><td class="sym muted" colspan="9">No backtest trades</td></tr>';
@@ -680,6 +698,7 @@ function setupAutoScan(){
 paintAll();
 setupAutoScan();
 setInterval(() => { if(state.running) paperTick(); }, 60000);
+setInterval(refreshSignalPrices, 60000);
 setInterval(refreshMarks, 15000);
 setInterval(() => { if(state.positions.length || state.running) drawSpark(), updateStatusLine(state.running ? `Paper running · ${state.positions.length} open · ${tw(nowMs())}` : `Ready · ${tw(nowMs())}`); }, 30000);
 </script>
