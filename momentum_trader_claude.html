@@ -98,7 +98,8 @@
     <label>Paper gate <input type="number" value="82" disabled style="width:54px"></label>
   </div>
   <div class="controls" style="margin-top:8px">
-    <label>Risk/trade <input type="text" value="1%" disabled style="width:56px"></label>
+    <label>Equity <input id="initialEquity" type="number" value="1000" min="100" step="100" style="width:90px"> U</label>
+    <label>Risk/trade <input id="riskPct" type="number" value="1" min="0.1" max="5" step="0.1" style="width:54px">%</label>
     <label>Stop <input type="text" value="ATR 1.2x · 3-8%" disabled style="width:130px"></label>
     <label>TP1 <input type="text" value="2R / 50%" disabled style="width:88px"></label>
     <label>Trail <input type="text" value="ATR 1.5x · min 8%" disabled style="width:134px"></label>
@@ -182,7 +183,7 @@ const LABELS = {
   narrative_momentum: '題材動量順勢'
 };
 const CFG = {
-  initialEquity: 10000,
+  initialEquity: 1000,
   riskPerTrade: 0.01,
   maxPositions: 5,
   maxTotalRisk: 0.05,
@@ -235,9 +236,15 @@ function mean(xs){ return xs.length ? xs.reduce((a,b)=>a+b,0)/xs.length : 0; }
 function loadState(){
   const raw = localStorage.getItem('lanaaiMomentumClaude');
   if(raw){
-    try { return JSON.parse(raw); } catch {}
+    try {
+      const s = JSON.parse(raw);
+      if(typeof s.initialEquity === 'number') CFG.initialEquity = s.initialEquity;
+      else s.initialEquity = CFG.initialEquity;
+      if(typeof s.riskPerTrade === 'number') CFG.riskPerTrade = s.riskPerTrade;
+      return s;
+    } catch {}
   }
-  return { running:false, equity:CFG.initialEquity, peakEquity:CFG.initialEquity, pausedUntil:0, consecutiveLosses:0, signals:[], positions:[], trades:[], equityCurve:[], backtest:null, lastScanAt:0 };
+  return { running:false, initialEquity:CFG.initialEquity, equity:CFG.initialEquity, peakEquity:CFG.initialEquity, pausedUntil:0, consecutiveLosses:0, signals:[], positions:[], trades:[], equityCurve:[], backtest:null, lastScanAt:0 };
 }
 function saveState(){ localStorage.setItem('lanaaiMomentumClaude', JSON.stringify(state)); paintAll(); }
 
@@ -491,7 +498,7 @@ async function startPaper(){ state.running = true; saveState(); await paperTick(
 function stopPaper(){ state.running = false; saveState(); }
 function resetPaper(){
   if(!confirm('確定要重置 paper trading？所有未平倉與紀錄會清空。')) return;
-  state.running = false; state.equity = CFG.initialEquity; state.peakEquity = CFG.initialEquity;
+  state.running = false; state.initialEquity = CFG.initialEquity; state.equity = CFG.initialEquity; state.peakEquity = CFG.initialEquity;
   state.pausedUntil = 0; state.consecutiveLosses = 0; state.positions = []; state.trades = []; state.equityCurve = [];
   saveState();
 }
@@ -601,7 +608,7 @@ function unrealizedFor(p){
 function drawSpark(){
   const svg = document.getElementById('equitySpark');
   if(!svg) return;
-  const seed = [{ equity:CFG.initialEquity }];
+  const seed = [{ equity:state.initialEquity ?? CFG.initialEquity }];
   const curve = state.equityCurve || [];
   const tail = [{ equity:state.equity }];
   const all = [...seed, ...curve, ...tail].map(p => Number(p.equity));
@@ -625,7 +632,7 @@ function paintAll(){
   const bt = state.backtest;
   const paperStats = statsFromTrades(state.trades || []);
   const drawdown = safeDiv(state.peakEquity - state.equity, state.peakEquity, 0) * 100;
-  const paperPnl = state.equity - CFG.initialEquity;
+  const paperPnl = state.equity - (state.initialEquity ?? CFG.initialEquity);
   metric('sTotal', String(paperStats.count || bt?.summary?.tradeCount || 0));
   metric('sOpen', String(state.positions.length), 'accent');
   metric('sWin', showPct(paperStats.count ? paperStats.win : bt?.summary?.winRatePct || 0));
@@ -695,7 +702,35 @@ function setupAutoScan(){
   minIn.addEventListener('change', () => { if(cb.checked) apply(); });
 }
 
+function setupCapitalInputs(){
+  const riskIn = document.getElementById('riskPct');
+  const equityIn = document.getElementById('initialEquity');
+  riskIn.value = (CFG.riskPerTrade * 100);
+  equityIn.value = state.initialEquity ?? CFG.initialEquity;
+  riskIn.addEventListener('change', () => {
+    const v = clamp(Number(riskIn.value) || 1, 0.1, 5);
+    riskIn.value = v;
+    CFG.riskPerTrade = v / 100;
+    state.riskPerTrade = v / 100;
+    saveState();
+    log(`Risk/trade 設為 ${v}%`);
+  });
+  equityIn.addEventListener('change', () => {
+    const v = Math.max(100, Number(equityIn.value) || 1000);
+    equityIn.value = v;
+    const oldBase = state.initialEquity ?? CFG.initialEquity;
+    const shift = v - oldBase;
+    state.initialEquity = v;
+    state.equity += shift;
+    state.peakEquity += shift;
+    CFG.initialEquity = v;
+    saveState();
+    log(`Equity 基準設為 ${v} U（PnL 保留）`);
+  });
+}
+
 paintAll();
+setupCapitalInputs();
 setupAutoScan();
 setInterval(() => { if(state.running) paperTick(); }, 60000);
 setInterval(refreshSignalPrices, 60000);
