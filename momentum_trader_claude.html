@@ -571,6 +571,28 @@ async function paperTick(){
   }
   saveState();
 }
+function closePosition(p, exit, reason, exitTime){
+  const exitPnl = p.remainingQty * (exit - p.entry);
+  const totalPnl = (p.realizedPnl || 0) + exitPnl;
+  state.equity += exitPnl;
+  state.peakEquity = Math.max(state.peakEquity, state.equity);
+  state.trades.unshift({ symbol:p.symbol, strategyKey:p.strategyKey, strategyLabel:p.strategyLabel, entryTime:p.entryTime, exitTime, entry:p.entry, exit, qty:p.qty, pnl:totalPnl, rMultiple:safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct:pct(p.entry,p.highest)||0, maePct:pct(p.entry,p.lowest)||0, score:p.score });
+  state.equityCurve.push({ timeMs:exitTime, equity:state.equity, drawdownPct:safeDiv(state.peakEquity-state.equity, state.peakEquity, 0)*100 });
+  state.consecutiveLosses = totalPnl < 0 ? state.consecutiveLosses + 1 : 0;
+  if(state.consecutiveLosses >= 3){ state.pausedUntil = nowMs() + 6*60*60*1000; state.consecutiveLosses = 0; }
+  if(safeDiv(state.peakEquity-state.equity, state.peakEquity, 0) >= 0.12) state.running = false;
+}
+function takeTP1(p){
+  const sellQty = p.remainingQty * 0.5;
+  const tpPnl = sellQty * (p.tp1 - p.entry);
+  state.equity += tpPnl;
+  state.peakEquity = Math.max(state.peakEquity, state.equity);
+  p.realizedPnl = (p.realizedPnl || 0) + tpPnl;
+  p.remainingQty -= sellQty;
+  p.tp1Done = true;
+  p.stop = p.entry;
+}
+
 async function updatePositions(){
   const stillOpen = [];
   for(const p of state.positions){
@@ -584,26 +606,15 @@ async function updatePositions(){
         p.highest = Math.max(p.highest, high); p.lowest = Math.min(p.lowest, low);
         p.last = close;
         const effectiveStop = p.tp1Done ? Math.max(p.entry, p.highest * (1 - p.trailPct/100)) : p.stop;
-        let exit = null, reason = '';
-        if(low <= effectiveStop){ exit = effectiveStop; reason = p.tp1Done ? 'trail_stop' : 'stop'; }
-        else if(!p.tp1Done && high >= p.tp1){
-          const sellQty = p.remainingQty * 0.5;
-          const tpPnl = sellQty * (p.tp1 - p.entry);
-          state.equity += tpPnl;
-          state.peakEquity = Math.max(state.peakEquity, state.equity);
-          p.realizedPnl = (p.realizedPnl || 0) + tpPnl;
-          p.remainingQty -= sellQty; p.tp1Done = true; p.stop = p.entry;
-        } else if(kTime(bar) >= p.entryTime + CFG.maxHoldHours*60*60*1000){ exit = close; reason = 'time_exit'; }
-        if(exit !== null){
-          const exitPnl = p.remainingQty * (exit - p.entry);
-          const totalPnl = (p.realizedPnl || 0) + exitPnl;
-          state.equity += exitPnl; state.peakEquity = Math.max(state.peakEquity, state.equity);
-          const trade = { symbol:p.symbol, strategyKey:p.strategyKey, strategyLabel:p.strategyLabel, entryTime:p.entryTime, exitTime:kTime(bar), entry:p.entry, exit, qty:p.qty, pnl:totalPnl, rMultiple:safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct:pct(p.entry,p.highest)||0, maePct:pct(p.entry,p.lowest)||0, score:p.score };
-          state.trades.unshift(trade);
-          state.equityCurve.push({ timeMs:kTime(bar), equity:state.equity, drawdownPct:safeDiv(state.peakEquity-state.equity, state.peakEquity, 0)*100 });
-          state.consecutiveLosses = totalPnl < 0 ? state.consecutiveLosses + 1 : 0;
-          if(state.consecutiveLosses >= 3){ state.pausedUntil = nowMs() + 6*60*60*1000; state.consecutiveLosses = 0; }
-          if(safeDiv(state.peakEquity-state.equity, state.peakEquity, 0) >= 0.12) state.running = false;
+        if(low <= effectiveStop){
+          closePosition(p, effectiveStop, p.tp1Done ? 'trail_stop' : 'stop', kTime(bar));
+          closed = true; break;
+        }
+        if(!p.tp1Done && high >= p.tp1){
+          takeTP1(p);
+        }
+        if(kTime(bar) >= p.entryTime + CFG.maxHoldHours*60*60*1000){
+          closePosition(p, close, 'time_exit', kTime(bar));
           closed = true; break;
         }
       }
@@ -634,15 +645,31 @@ async function refreshMarks(){
     const prices = await Promise.all(state.positions.map(p =>
       request('/fapi/v1/ticker/price', { symbol:p.symbol }).then(r => Number(r.price)).catch(() => null)
     ));
-    let updated = false;
+    const stillOpen = [];
+    let changed = false;
     state.positions.forEach((p, i) => {
-      if(prices[i] && Number.isFinite(prices[i])){
-        p.last = prices[i];
-        if(prices[i] > (p.highest || 0)) p.highest = prices[i];
-        updated = true;
+      const price = prices[i];
+      if(!price || !Number.isFinite(price)){ stillOpen.push(p); return; }
+      p.last = price;
+      if(price > (p.highest || 0)) p.highest = price;
+      if(price < (p.lowest || Infinity)) p.lowest = price;
+      changed = true;
+      if(state.running){
+        const effectiveStop = p.tp1Done ? Math.max(p.entry, p.highest * (1 - p.trailPct/100)) : p.stop;
+        if(price <= effectiveStop){
+          closePosition(p, effectiveStop, p.tp1Done ? 'trail_stop' : 'stop', nowMs());
+          log(`即時出場 · ${p.symbol} @ ${fmt(effectiveStop,8)} (${p.tp1Done ? '移動停利' : '止損'})`);
+          return;
+        }
+        if(!p.tp1Done && price >= p.tp1){
+          takeTP1(p);
+          log(`TP1 觸發 · ${p.symbol} @ ${fmt(p.tp1,8)}`);
+        }
       }
+      stillOpen.push(p);
     });
-    if(updated) paintAll();
+    state.positions = stillOpen;
+    if(changed) saveState();
   } catch(e){ console.warn('mark refresh', e); }
 }
 
