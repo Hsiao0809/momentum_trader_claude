@@ -162,12 +162,34 @@
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th class="sym">Symbol</th><th class="left">Strategy</th><th>Entry</th><th>Exit</th><th>R</th><th>PnL U</th><th>MFE%</th><th>MAE%</th><th>Score</th><th>Entry time</th><th>Exit time</th><th class="left">Reason</th>
+          <th class="sym">Symbol</th><th class="left">Strategy</th><th>Entry</th><th>Exit</th><th>R</th><th>PnL U</th><th>MFE%</th><th>MAE%</th><th>Score</th><th>時數</th><th>Entry time</th><th>Exit time</th><th class="left">Reason</th>
         </tr></thead>
         <tbody id="tradesBody"></tbody>
       </table>
     </div>
     <div id="log" class="status-box">Standalone mode · Binance public API · Taiwan time (UTC+8) · click symbol to open in TradingView.</div>
+  </section>
+
+  <section id="reviewSection" style="display:none">
+    <div class="section-head"><h2>覆盤分析</h2><div id="reviewSummary" class="summary"></div></div>
+    <div class="cols2">
+      <div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th class="left">策略</th><th>次數</th><th>勝率</th><th>Avg R</th><th>PnL U</th></tr></thead>
+            <tbody id="reviewStrategyBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th class="left">出場原因</th><th>次數</th><th>勝率</th><th>Avg R</th><th>PnL U</th></tr></thead>
+            <tbody id="reviewReasonBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   </section>
 </main>
 
@@ -668,11 +690,46 @@ function paintAll(){
   }).join('') : '<tr><td class="sym muted" colspan="14">No open position</td></tr>';
 
   document.getElementById('tradeSummary').textContent = `${state.trades.length} closed paper trades`;
-  document.getElementById('tradesBody').innerHTML = state.trades.length ? state.trades.slice(0,100).map(t => `<tr><td class="sym">${symLink(t.symbol)}</td><td class="left">${htmlEscape(t.strategyLabel || t.strategyKey)}</td><td>${fmt(t.entry,8)}</td><td>${fmt(t.exit,8)}</td><td class="${signedClass(t.rMultiple)}">${fmt(t.rMultiple,2)}</td><td class="${signedClass(t.pnl)}">${fmt(t.pnl,2)}</td><td class="pos">${showPct(t.mfePct)}</td><td class="neg">${showPct(t.maePct)}</td><td>${fmt(t.score,0)}</td><td>${tw(t.entryTime)}</td><td>${tw(t.exitTime)}</td><td class="left">${htmlEscape(t.reason)}</td></tr>`).join('') : '<tr><td class="sym muted" colspan="12">No closed paper trade</td></tr>';
+  document.getElementById('tradesBody').innerHTML = state.trades.length ? state.trades.slice(0,100).map(t => {
+    const holdH = (t.exitTime && t.entryTime) ? fmt((t.exitTime - t.entryTime) / 3600000, 1) : '—';
+    return `<tr><td class="sym">${symLink(t.symbol)}</td><td class="left">${htmlEscape(t.strategyLabel || t.strategyKey)}</td><td>${fmt(t.entry,8)}</td><td>${fmt(t.exit,8)}</td><td class="${signedClass(t.rMultiple)}">${fmt(t.rMultiple,2)}</td><td class="${signedClass(t.pnl)}">${fmt(t.pnl,2)}</td><td class="pos">${showPct(t.mfePct)}</td><td class="neg">${showPct(t.maePct)}</td><td>${fmt(t.score,0)}</td><td>${holdH}h</td><td>${tw(t.entryTime)}</td><td>${tw(t.exitTime)}</td><td class="left">${htmlEscape(t.reason)}</td></tr>`;
+  }).join('') : '<tr><td class="sym muted" colspan="13">No closed paper trade</td></tr>';
+  paintReview();
 
   drawSpark();
   updateStatusLine(state.running ? `Paper running · ${state.positions.length} open · ${tw(nowMs())}` : `Ready · ${tw(nowMs())}`);
 }
+const REASON_LABELS = { stop:'止損', trail_stop:'移動停利', tp1:'TP1 出場', time_exit:'到期出場' };
+function buildBreakdown(trades, keyFn){
+  const map = {};
+  trades.forEach(t => {
+    const k = keyFn(t);
+    if(!map[k]) map[k] = { count:0, wins:0, r:0, pnl:0 };
+    map[k].count++;
+    if(Number(t.pnl||0) >= 0) map[k].wins++;
+    map[k].r += Number(t.rMultiple||0);
+    map[k].pnl += Number(t.pnl||0);
+  });
+  return Object.entries(map)
+    .map(([k,v]) => ({ key:k, count:v.count, winPct:v.wins/v.count*100, avgR:v.r/v.count, totalPnl:v.pnl }))
+    .sort((a,b) => b.count - a.count);
+}
+function paintReview(){
+  const trades = state.trades || [];
+  const section = document.getElementById('reviewSection');
+  if(!section) return;
+  if(!trades.length){ section.style.display='none'; return; }
+  section.style.display = '';
+  const rowHtml = rows => rows.map(r =>
+    `<tr><td class="left">${htmlEscape(r.key)}</td><td>${r.count}</td><td class="${r.winPct>=50?'pos':'neg'}">${showPct(r.winPct)}</td><td class="${signedClass(r.avgR)}">${fmt(r.avgR,2)}R</td><td class="${signedClass(r.totalPnl)}">${fmt(r.totalPnl,2)}</td></tr>`
+  ).join('');
+  document.getElementById('reviewStrategyBody').innerHTML = rowHtml(buildBreakdown(trades, t => t.strategyLabel || t.strategyKey || '—'));
+  document.getElementById('reviewReasonBody').innerHTML = rowHtml(buildBreakdown(trades, t => REASON_LABELS[t.reason] || t.reason || '—'));
+  const wins = trades.filter(t => Number(t.pnl||0) >= 0).length;
+  const avgHold = trades.reduce((a,t) => a + ((t.exitTime&&t.entryTime) ? (t.exitTime-t.entryTime)/3600000 : 0), 0) / trades.length;
+  document.getElementById('reviewSummary').textContent = `勝率 ${showPct(wins/trades.length*100)} · 平均持倉 ${fmt(avgHold,1)}h`;
+}
+
 function csvValue(v){ if(v === null || v === undefined) return ''; const s = typeof v === 'object' ? JSON.stringify(v) : String(v); return /[",\n]/.test(s) ? `"${s.replaceAll('"','""')}"` : s; }
 function downloadCsv(name, rows){
   if(!rows.length){ log('Nothing to download.'); return; }
