@@ -636,7 +636,11 @@ async function refreshMarks(){
     ));
     let updated = false;
     state.positions.forEach((p, i) => {
-      if(prices[i] && Number.isFinite(prices[i])){ p.last = prices[i]; updated = true; }
+      if(prices[i] && Number.isFinite(prices[i])){
+        p.last = prices[i];
+        if(prices[i] > (p.highest || 0)) p.highest = prices[i];
+        updated = true;
+      }
     });
     if(updated) paintAll();
   } catch(e){ console.warn('mark refresh', e); }
@@ -716,7 +720,14 @@ function paintAll(){
     const lastCell = p.last ? fmt(p.last,8) : '<span class="muted">—</span>';
     const pctCell = u.pct === null ? '<span class="muted">—</span>' : `<span class="${signedClass(u.pct)}">${showPct(u.pct)}</span>`;
     const pnlCell = u.pnl === null ? '<span class="muted">—</span>' : `<span class="${signedClass(u.pnl)}">${fmt(u.pnl,2)}</span>`;
-    return `<tr><td class="sym">${symLink(p.symbol)}</td><td class="left">${htmlEscape(p.strategyLabel || p.strategyKey)}</td><td>${fmt(p.entry,8)}</td><td>${lastCell}</td><td>${pctCell}</td><td>${pnlCell}</td><td class="neg">${fmt(p.stop,8)}</td><td class="pos">${fmt(p.tp1,8)}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.remainingQty,4)}</td><td>${fmt(p.riskUsdt,2)}</td><td>${fmt(p.score,0)}</td><td>${tw(p.entryTime)}</td><td class="reason">${htmlEscape((p.reasons||[]).slice(0,3).join(' · '))}</td></tr>`;
+    const effectiveStop = p.tp1Done ? Math.max(p.entry, (p.highest||p.entry) * (1 - p.trailPct/100)) : p.stop;
+    const stopCell = p.tp1Done
+      ? `<span class="pill live" style="font-size:.65rem;margin-right:2px">移</span><span class="pos">${fmt(effectiveStop,8)}</span>`
+      : `<span class="neg">${fmt(p.stop,8)}</span>`;
+    const tp1Cell = p.tp1Done
+      ? `<span class="pos">✓ ${fmt(p.tp1,8)}</span>`
+      : `<span class="muted">${fmt(p.tp1,8)}</span>`;
+    return `<tr><td class="sym">${symLink(p.symbol)}</td><td class="left">${htmlEscape(p.strategyLabel || p.strategyKey)}</td><td>${fmt(p.entry,8)}</td><td>${lastCell}</td><td>${pctCell}</td><td>${pnlCell}</td><td>${stopCell}</td><td>${tp1Cell}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.remainingQty,4)}</td><td>${fmt(p.riskUsdt,2)}</td><td>${fmt(p.score,0)}</td><td>${tw(p.entryTime)}</td><td class="reason">${htmlEscape((p.reasons||[]).slice(0,3).join(' · '))}</td></tr>`;
   }).join('') : '<tr><td class="sym muted" colspan="14">No open position</td></tr>';
 
   document.getElementById('tradeSummary').textContent = `${state.trades.length} closed paper trades`;
