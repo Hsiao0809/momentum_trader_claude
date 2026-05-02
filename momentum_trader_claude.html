@@ -219,6 +219,7 @@ const CFG = {
 };
 let state = loadState();
 let autoScanTimer = null;
+let paperTickRunning = false;
 
 function nowMs(){ return Date.now(); }
 function tw(ms){
@@ -552,9 +553,11 @@ function resetPaper(){
   saveState();
 }
 async function paperTick(){
-  if(!state.running) return;
+  if(!state.running || paperTickRunning) return;
+  paperTickRunning = true;
+  try {
   await updatePositions();
-  if(state.pausedUntil && nowMs() < state.pausedUntil){ saveState(); return; }
+  if(state.pausedUntil && nowMs() < state.pausedUntil){ saveState(); paperTickRunning = false; return; }
   if(!state.signals.length || nowMs() - state.lastScanAt > 3*60*1000) await scanSignals();
   const openSymbols = new Set(state.positions.map(p => p.symbol));
   const stoppedRecent = new Set((state.trades || [])
@@ -570,6 +573,7 @@ async function paperTick(){
     totalRisk += sized.riskUsdt; openSymbols.add(sig.symbol);
   }
   saveState();
+  } finally { paperTickRunning = false; }
 }
 function closePosition(p, exit, reason, exitTime){
   const exitPnl = p.remainingQty * (exit - p.entry);
