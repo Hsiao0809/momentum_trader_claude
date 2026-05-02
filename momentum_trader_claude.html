@@ -198,6 +198,7 @@ const FAPI = 'https://fapi.binance.com';
 const INTERVAL_MS = { '15m': 900000 };
 const TZ = 'Asia/Taipei';
 const LABELS = {
+  pullback_uptrend: '上升趨勢回檔',
   strong_momentum_breakout: '強動量突破追價',
   volume_ignition: '放量啟動追隨',
   high_range_continuation: '高位續勢承接',
@@ -213,7 +214,8 @@ const CFG = {
   minSignalScore: 70,
   paperMinScore: 82,
   maxHoldHours: 72,
-  cooldownBars: 4
+  cooldownBars: 96,
+  symbolStopCooldownMs: 24 * 60 * 60 * 1000
 };
 let state = loadState();
 let autoScanTimer = null;
@@ -254,6 +256,13 @@ function kVol(k){ return Number(k[5]); }
 function kTime(k){ return Number(k[0]); }
 function median(xs){ if(!xs.length) return 0; const a=[...xs].sort((x,y)=>x-y); const m=Math.floor(a.length/2); return a.length % 2 ? a[m] : (a[m-1]+a[m])/2; }
 function mean(xs){ return xs.length ? xs.reduce((a,b)=>a+b,0)/xs.length : 0; }
+function ema(values, period){
+  if(!values.length) return 0;
+  const k = 2 / (period + 1);
+  let e = values[0];
+  for(let i = 1; i < values.length; i++) e = values[i] * k + e * (1 - k);
+  return e;
+}
 
 function loadState(){
   const raw = localStorage.getItem('lanaaiMomentumClaude');
@@ -337,13 +346,14 @@ function btcRiskOff(rows){
 function buildRisk(entry, atrValue){
   const stopPct = Math.max(3, Math.min(8, 1.2 * atrValue));
   const stop = entry * (1 - stopPct / 100);
-  const tp1 = entry + 2 * (entry - stop);
+  const tp1 = entry + 1.5 * (entry - stop);
   const trailPct = Math.max(8, 1.5 * atrValue);
   return { stop, tp1, trailPct, stopPct };
 }
 function strategyKey(m){
+  if(m.isPullback) return 'pullback_uptrend';
   if((m.momentum4h >= 15 && m.position24h >= 0.80) || (m.momentum24h >= 20 && m.distancePrevHigh >= -2)) return 'strong_momentum_breakout';
-  if(m.momentum24h >= 8 && m.position24h >= 0.75 && m.momentum4h >= -3 && m.momentum4h <= 8) return 'high_range_continuation';
+  if(m.momentum24h >= 8 && m.position24h >= 0.75 && m.position24h < 0.92 && m.momentum4h >= -3 && m.momentum4h <= 8) return 'high_range_continuation';
   if(m.volumeRatio >= 2 && m.position24h >= 0.65 && m.momentum1h > -1) return 'volume_ignition';
   return 'narrative_momentum';
 }
@@ -364,6 +374,19 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
   const distancePrevHigh = pct(prevHigh, price) || 0;
   const volumeRatio = safeDiv(kVol(c[c.length-1]), median(c.slice(-5,-1).map(kVol)), 0);
   const atrValue = atrPct(c);
+  const ema50 = ema(c.map(kClose), 50);
+  const aboveEma = price > ema50;
+  const emaSlope = pct(ema(c.slice(0, -8).map(kClose), 50), ema50) || 0;
+
+  // === HARD REJECTION FILTERS ===
+  if(momentum1h >= 6) return null;
+  if(position24h >= 0.95 && momentum1h > 0) return null;
+  if(momentum24h >= 10 && momentum4h < -1) return null;
+  if(!aboveEma) return null;
+  if(emaSlope < 0) return null;
+
+  const isPullback = momentum24h >= 5 && momentum4h >= -1 && momentum1h <= 0.5 && momentum1h >= -3 && position24h >= 0.40 && position24h <= 0.85;
+
   const risk = buildRisk(price, atrValue);
   let score = 10;
   const reasons = [`24h quote volume ${Math.round(quoteVolume).toLocaleString()} USDT`];
@@ -378,9 +401,13 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
   if(volumeRatio >= 3){ score += 5; reasons.push('volume expansion is unusually strong'); }
   if(momentum1h <= 18){ score += 10; reasons.push('not a one-candle runaway move'); } else { score -= 15; reasons.push(`1h move ${momentum1h.toFixed(2)}% is overheated`); }
   if(riskOff){ score -= 12; reasons.push('BTC context risk-off penalty'); }
+  // pullback bonus / chasing penalty / EMA confirmation
+  if(isPullback){ score += 18; reasons.push('healthy pullback in uptrend'); }
+  if(momentum1h >= 4 && position24h >= 0.85){ score -= 14; reasons.push('penalty: chasing the top'); }
+  score += 5; reasons.push('above 50-period EMA with positive slope');
   score = Math.round(clamp(score, 0, 100));
   if(score < minScore) return null;
-  const metrics = { momentum1h, momentum4h, momentum24h, position24h, distancePrevHigh, volumeRatio, atrPct:atrValue, stopPct:risk.stopPct, btcRiskOff:riskOff, lastKlineOpenTime:kTime(c[c.length-1]) };
+  const metrics = { momentum1h, momentum4h, momentum24h, position24h, distancePrevHigh, volumeRatio, atrPct:atrValue, stopPct:risk.stopPct, btcRiskOff:riskOff, lastKlineOpenTime:kTime(c[c.length-1]), aboveEma, emaSlope, isPullback };
   const key = strategyKey(metrics);
   return { scannedAt, symbol, score, strategyKey:key, strategyLabel:LABELS[key], entry:price, stop:risk.stop, tp1:risk.tp1, trailPct:risk.trailPct, atrPct:atrValue, quoteVolume, reasons, metrics };
 }
@@ -530,10 +557,13 @@ async function paperTick(){
   if(state.pausedUntil && nowMs() < state.pausedUntil){ saveState(); return; }
   if(!state.signals.length || nowMs() - state.lastScanAt > 3*60*1000) await scanSignals();
   const openSymbols = new Set(state.positions.map(p => p.symbol));
+  const stoppedRecent = new Set((state.trades || [])
+    .filter(t => t.reason === 'stop' && nowMs() - t.exitTime < CFG.symbolStopCooldownMs)
+    .map(t => t.symbol));
   let totalRisk = state.positions.reduce((a,p)=>a+p.riskUsdt,0);
   for(const sig of state.signals){
     if(state.positions.length >= CFG.maxPositions) break;
-    if(openSymbols.has(sig.symbol) || sig.score < CFG.paperMinScore) continue;
+    if(openSymbols.has(sig.symbol) || stoppedRecent.has(sig.symbol) || sig.score < CFG.paperMinScore) continue;
     const sized = positionSize(state.equity, sig.entry, sig.stop);
     if(totalRisk + sized.riskUsdt > state.equity * CFG.maxTotalRisk) break;
     state.positions.push({ id:`p_${nowMs()}_${sig.symbol}`, symbol:sig.symbol, strategyKey:sig.strategyKey, strategyLabel:sig.strategyLabel, entryTime:nowMs(), lastTime:nowMs(), entry:sig.entry, last:sig.entry, qty:sized.qty, remainingQty:sized.qty, stop:sig.stop, originalStop:sig.stop, tp1:sig.tp1, tp1Done:false, trailPct:sig.trailPct, highest:sig.entry, lowest:sig.entry, score:sig.score, riskUsdt:sized.riskUsdt, realizedPnl:0, reasons:sig.reasons });
