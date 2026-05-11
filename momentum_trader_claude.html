@@ -106,7 +106,13 @@
     <label>Stop <input type="text" value="ATR 1.2x · 3-8%" disabled style="width:130px"></label>
     <label>TP1 <input type="text" value="+27% / 50%" disabled style="width:88px"></label>
     <label>Trail <input type="text" value="ATR 1.5x · min 8%" disabled style="width:134px"></label>
-    <label>Storage <input type="text" value="localStorage" disabled style="width:96px"></label>
+    <label>Storage <input type="text" value="localStorage + Gist" disabled style="width:130px"></label>
+  </div>
+  <div class="controls" style="margin-top:8px">
+    <label>GitHub Token <input id="ghToken" type="password" placeholder="ghp_..." style="width:180px"></label>
+    <label>Gist ID <input id="ghGistId" type="text" placeholder="留空自動建立" style="width:210px"></label>
+    <button class="ghost" onclick="syncNow()">☁ 立即同步</button>
+    <span id="syncStatus" class="status" style="min-width:200px"></span>
   </div>
 </header>
 
@@ -281,7 +287,103 @@ function loadState(){
   }
   return { running:false, initialEquity:CFG.initialEquity, equity:CFG.initialEquity, peakEquity:CFG.initialEquity, pausedUntil:0, consecutiveLosses:0, signals:[], positions:[], trades:[], equityCurve:[], backtest:null, lastScanAt:0 };
 }
-function saveState(){ localStorage.setItem('lanaaiMomentumClaude', JSON.stringify(state)); paintAll(); }
+// ── Cloud sync (GitHub Gist) ──────────────────────────────────────────────
+const GIST_API = 'https://api.github.com/gists';
+const GIST_FILENAME = 'momentum_state.json';
+let cloudSaveTimer = null;
+let syncStatusTimer = null;
+
+function loadCloudCfg(){
+  try { return JSON.parse(localStorage.getItem('lanaaiCloudCfg') || '{}'); } catch { return {}; }
+}
+function saveCloudCfg(cfg){ localStorage.setItem('lanaaiCloudCfg', JSON.stringify(cfg)); }
+
+function setSyncStatus(msg, isErr=false){
+  const el = document.getElementById('syncStatus');
+  if(!el) return;
+  el.textContent = msg;
+  el.style.color = isErr ? 'var(--red)' : 'var(--green)';
+  clearTimeout(syncStatusTimer);
+  syncStatusTimer = setTimeout(() => { el.textContent = ''; el.style.color = ''; }, 5000);
+}
+
+async function fetchGist(){
+  const cfg = loadCloudCfg();
+  if(!cfg.token || !cfg.gistId) return null;
+  try {
+    const res = await fetch(`${GIST_API}/${cfg.gistId}`, {
+      headers: { Authorization: `Bearer ${cfg.token}`, Accept: 'application/vnd.github+json' }
+    });
+    if(!res.ok) throw new Error(`Gist GET ${res.status}`);
+    const data = await res.json();
+    const raw = data.files?.[GIST_FILENAME]?.content;
+    return raw ? JSON.parse(raw) : null;
+  } catch(e) { console.warn('fetchGist', e); return null; }
+}
+
+async function pushToCloud(){
+  const cfg = loadCloudCfg();
+  if(!cfg.token) return;
+  const upload = { ...state };
+  delete upload.signals;
+  const content = JSON.stringify(upload);
+  try {
+    let res, data;
+    if(cfg.gistId){
+      res = await fetch(`${GIST_API}/${cfg.gistId}`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${cfg.token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: { [GIST_FILENAME]: { content } } })
+      });
+    } else {
+      res = await fetch(GIST_API, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${cfg.token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description: 'Claude Momentum Dashboard state', public: false, files: { [GIST_FILENAME]: { content } } })
+      });
+    }
+    if(!res.ok) throw new Error(`Gist ${cfg.gistId ? 'PATCH' : 'POST'} ${res.status}`);
+    data = await res.json();
+    if(!cfg.gistId){
+      cfg.gistId = data.id;
+      saveCloudCfg(cfg);
+      const el = document.getElementById('ghGistId');
+      if(el) el.value = data.id;
+    }
+    setSyncStatus(`☁ 已同步 ${tw(nowMs())}`);
+  } catch(e) { setSyncStatus(`☁ 同步失敗: ${e.message}`, true); console.warn('pushToCloud', e); }
+}
+
+function debouncedCloudSave(){
+  clearTimeout(cloudSaveTimer);
+  cloudSaveTimer = setTimeout(pushToCloud, 30000);
+}
+
+function syncNow(){ clearTimeout(cloudSaveTimer); pushToCloud(); }
+
+function setupCloudSync(){
+  const tokenEl = document.getElementById('ghToken');
+  const gistEl = document.getElementById('ghGistId');
+  const cfg = loadCloudCfg();
+  if(tokenEl && cfg.token) tokenEl.value = cfg.token;
+  if(gistEl && cfg.gistId) gistEl.value = cfg.gistId;
+  const persist = () => {
+    const c = loadCloudCfg();
+    c.token = tokenEl?.value.trim() || '';
+    c.gistId = gistEl?.value.trim() || '';
+    saveCloudCfg(c);
+  };
+  tokenEl?.addEventListener('change', persist);
+  gistEl?.addEventListener('change', persist);
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+function saveState(){
+  state.savedAt = nowMs();
+  localStorage.setItem('lanaaiMomentumClaude', JSON.stringify(state));
+  paintAll();
+  debouncedCloudSave();
+}
 
 async function request(path, params={}){
   const qs = new URLSearchParams(Object.entries(params).filter(([,v]) => v !== undefined && v !== null)).toString();
@@ -864,10 +966,20 @@ function setupCapitalInputs(){
 paintAll();
 setupCapitalInputs();
 setupAutoScan();
+setupCloudSync();
 setInterval(() => { if(state.running) paperTick(); }, 60000);
 setInterval(refreshSignalPrices, 60000);
 setInterval(refreshMarks, 15000);
 setInterval(() => { if(state.positions.length || state.running) drawSpark(), updateStatusLine(state.running ? `Paper running · ${state.positions.length} open · ${tw(nowMs())}` : `Ready · ${tw(nowMs())}`); }, 30000);
+(async () => {
+  const cloud = await fetchGist();
+  if(cloud && (cloud.savedAt || 0) > (state.savedAt || 0)){
+    state = cloud;
+    localStorage.setItem('lanaaiMomentumClaude', JSON.stringify(state));
+    paintAll();
+    setSyncStatus('☁ 已從雲端載入最新資料');
+  }
+})();
 </script>
 </body>
 </html>
