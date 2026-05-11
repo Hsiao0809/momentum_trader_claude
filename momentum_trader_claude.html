@@ -104,7 +104,7 @@
     <label>Equity <input id="initialEquity" type="number" value="1000" min="100" step="100" style="width:90px"> U</label>
     <label>Risk/trade <input id="riskPct" type="number" value="1" min="0.1" max="5" step="0.1" style="width:54px">%</label>
     <label>Stop <input type="text" value="ATR 1.2x · 3-8%" disabled style="width:130px"></label>
-    <label>TP1 <input type="text" value="+27% / 50%" disabled style="width:88px"></label>
+    <label>止損升級 <input type="text" value="保+8% · 鎖+15% · TP+20%" disabled style="width:160px"></label>
     <label>Trail <input type="text" value="ATR 1.5x · min 8%" disabled style="width:134px"></label>
     <label>Storage <input type="text" value="localStorage + Gist" disabled style="width:130px"></label>
   </div>
@@ -452,9 +452,26 @@ function btcRiskOff(rows){
 function buildRisk(entry, atrValue){
   const stopPct = Math.max(3, Math.min(8, 1.2 * atrValue));
   const stop = entry * (1 - stopPct / 100);
-  const tp1 = entry * 1.27;
+  const beTrigger   = entry * 1.08;   // +8%: 止損移至成本
+  const lockTrigger = entry * 1.15;   // +15%: 止損鎖定 +5%
+  const lockLevel   = entry * 1.05;   // 鎖利止損位 = +5%
+  const tp1         = entry * 1.20;   // +20%: 部分出場 + 移動止損啟動
   const trailPct = Math.max(8, 1.5 * atrValue);
-  return { stop, tp1, trailPct, stopPct };
+  return { stop, tp1, beTrigger, lockTrigger, lockLevel, trailPct, stopPct };
+}
+function effectiveStopFor(p){
+  const h = p.highest || p.entry;
+  if(p.tp1Done) return Math.max(p.lockLevel || p.entry, h * (1 - p.trailPct / 100));
+  if(p.lockTrigger && h >= p.lockTrigger) return Math.max(p.stop, p.lockLevel || p.entry);
+  if(p.beTrigger  && h >= p.beTrigger)   return Math.max(p.stop, p.entry);
+  return p.stop;
+}
+function stopReasonFor(p){
+  if(p.tp1Done) return 'trail_stop';
+  const h = p.highest || p.entry;
+  if(p.lockTrigger && h >= p.lockTrigger) return 'lock_stop';
+  if(p.beTrigger  && h >= p.beTrigger)   return 'be_stop';
+  return 'stop';
 }
 function strategyKey(m){
   if(m.isPullback) return 'pullback_uptrend';
@@ -515,7 +532,7 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
   if(score < minScore) return null;
   const metrics = { momentum1h, momentum4h, momentum24h, position24h, distancePrevHigh, volumeRatio, atrPct:atrValue, stopPct:risk.stopPct, btcRiskOff:riskOff, lastKlineOpenTime:kTime(c[c.length-1]), aboveEma, emaSlope, isPullback };
   const key = strategyKey(metrics);
-  return { scannedAt, symbol, score, strategyKey:key, strategyLabel:LABELS[key], entry:price, stop:risk.stop, tp1:risk.tp1, trailPct:risk.trailPct, atrPct:atrValue, quoteVolume, reasons, metrics };
+  return { scannedAt, symbol, score, strategyKey:key, strategyLabel:LABELS[key], entry:price, stop:risk.stop, tp1:risk.tp1, beTrigger:risk.beTrigger, lockTrigger:risk.lockTrigger, lockLevel:risk.lockLevel, trailPct:risk.trailPct, atrPct:atrValue, quoteVolume, reasons, metrics };
 }
 
 async function scanSignals(){
@@ -571,16 +588,21 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
     const bar = rows[i], high = kHigh(bar), low = kLow(bar), close = kClose(bar);
     highest = Math.max(highest, high); lowest = Math.min(lowest, low);
     mfe = Math.max(mfe, pct(entry, high) || 0); mae = Math.min(mae, pct(entry, low) || 0);
-    const effectiveStop = tp1Done ? Math.max(entry, highest * (1 - risk.trailPct / 100)) : stop;
+    const effectiveStop = tp1Done
+      ? Math.max(risk.lockLevel, highest * (1 - risk.trailPct / 100))
+      : highest >= risk.lockTrigger ? Math.max(stop, risk.lockLevel)
+      : highest >= risk.beTrigger   ? Math.max(stop, entry)
+      : stop;
     if(low <= effectiveStop){
-      exit = effectiveStop; exitTime = kTime(bar); realized += remainingQty * (exit - entry); reason = tp1Done ? 'trail_stop' : 'stop'; break;
+      exit = effectiveStop; exitTime = kTime(bar); realized += remainingQty * (exit - entry);
+      reason = tp1Done ? 'trail_stop' : highest >= risk.lockTrigger ? 'lock_stop' : highest >= risk.beTrigger ? 'be_stop' : 'stop';
+      break;
     }
     if(!tp1Done && high >= risk.tp1){
       const sellQty = remainingQty * 0.5;
       realized += sellQty * (risk.tp1 - entry);
       remainingQty -= sellQty;
       tp1Done = true;
-      stop = entry;
     }
     if(i === lastIndex){ exit = close; exitTime = kTime(bar); realized += remainingQty * (exit - entry); }
   }
@@ -674,7 +696,7 @@ async function paperTick(){
     if(openSymbols.has(sig.symbol) || stoppedRecent.has(sig.symbol) || sig.score < CFG.paperMinScore) continue;
     const sized = positionSize(state.equity, sig.entry, sig.stop);
     if(totalRisk + sized.riskUsdt > state.equity * CFG.maxTotalRisk) break;
-    state.positions.push({ id:`p_${nowMs()}_${sig.symbol}`, symbol:sig.symbol, strategyKey:sig.strategyKey, strategyLabel:sig.strategyLabel, entryTime:nowMs(), lastTime:nowMs(), entry:sig.entry, last:sig.entry, qty:sized.qty, remainingQty:sized.qty, stop:sig.stop, originalStop:sig.stop, tp1:sig.tp1, tp1Done:false, trailPct:sig.trailPct, highest:sig.entry, lowest:sig.entry, score:sig.score, riskUsdt:sized.riskUsdt, realizedPnl:0, reasons:sig.reasons });
+    state.positions.push({ id:`p_${nowMs()}_${sig.symbol}`, symbol:sig.symbol, strategyKey:sig.strategyKey, strategyLabel:sig.strategyLabel, entryTime:nowMs(), lastTime:nowMs(), entry:sig.entry, last:sig.entry, qty:sized.qty, remainingQty:sized.qty, stop:sig.stop, originalStop:sig.stop, tp1:sig.tp1, beTrigger:sig.beTrigger, lockTrigger:sig.lockTrigger, lockLevel:sig.lockLevel, tp1Done:false, trailPct:sig.trailPct, highest:sig.entry, lowest:sig.entry, score:sig.score, riskUsdt:sized.riskUsdt, realizedPnl:0, reasons:sig.reasons });
     totalRisk += sized.riskUsdt; openSymbols.add(sig.symbol);
   }
   saveState();
@@ -714,9 +736,9 @@ async function updatePositions(){
         const high = kHigh(bar), low = kLow(bar), close = kClose(bar);
         p.highest = Math.max(p.highest, high); p.lowest = Math.min(p.lowest, low);
         p.last = close;
-        const effectiveStop = p.tp1Done ? Math.max(p.entry, p.highest * (1 - p.trailPct/100)) : p.stop;
+        const effectiveStop = effectiveStopFor(p);
         if(low <= effectiveStop){
-          closePosition(p, effectiveStop, p.tp1Done ? 'trail_stop' : 'stop', kTime(bar));
+          closePosition(p, effectiveStop, stopReasonFor(p), kTime(bar));
           closed = true; break;
         }
         if(!p.tp1Done && high >= p.tp1){
@@ -764,10 +786,12 @@ async function refreshMarks(){
       if(price < (p.lowest || Infinity)) p.lowest = price;
       changed = true;
       if(state.running){
-        const effectiveStop = p.tp1Done ? Math.max(p.entry, p.highest * (1 - p.trailPct/100)) : p.stop;
+        const effectiveStop = effectiveStopFor(p);
+        const exitReason = stopReasonFor(p);
         if(price <= effectiveStop){
-          closePosition(p, effectiveStop, p.tp1Done ? 'trail_stop' : 'stop', nowMs());
-          log(`即時出場 · ${p.symbol} @ ${fmt(effectiveStop,8)} (${p.tp1Done ? '移動停利' : '止損'})`);
+          closePosition(p, effectiveStop, exitReason, nowMs());
+          const reasonLabel = {stop:'止損',be_stop:'保本出場',lock_stop:'鎖利出場',trail_stop:'移動停利'}[exitReason] || exitReason;
+          log(`即時出場 · ${p.symbol} @ ${fmt(effectiveStop,8)} (${reasonLabel})`);
           return;
         }
         if(!p.tp1Done && price >= p.tp1){
@@ -856,9 +880,14 @@ function paintAll(){
     const lastCell = p.last ? fmt(p.last,8) : '<span class="muted">—</span>';
     const pctCell = u.pct === null ? '<span class="muted">—</span>' : `<span class="${signedClass(u.pct)}">${showPct(u.pct)}</span>`;
     const pnlCell = u.pnl === null ? '<span class="muted">—</span>' : `<span class="${signedClass(u.pnl)}">${fmt(u.pnl,2)}</span>`;
-    const effectiveStop = p.tp1Done ? Math.max(p.entry, (p.highest||p.entry) * (1 - p.trailPct/100)) : p.stop;
+    const effectiveStop = effectiveStopFor(p);
+    const h_ = p.highest || p.entry;
     const stopCell = p.tp1Done
       ? `<span class="pill live" style="font-size:.65rem;margin-right:2px">移</span><span class="pos">${fmt(effectiveStop,8)}</span>`
+      : h_ >= (p.lockTrigger||Infinity)
+      ? `<span class="pill live" style="font-size:.65rem;margin-right:2px">鎖</span><span class="pos">${fmt(effectiveStop,8)}</span>`
+      : h_ >= (p.beTrigger||Infinity)
+      ? `<span class="pill live" style="font-size:.65rem;margin-right:2px">保</span><span class="pos">${fmt(effectiveStop,8)}</span>`
       : `<span class="neg">${fmt(p.stop,8)}</span>`;
     const tp1Cell = p.tp1Done
       ? `<span class="pos">✓ ${fmt(p.tp1,8)}</span>`
@@ -876,7 +905,7 @@ function paintAll(){
   drawSpark();
   updateStatusLine(state.running ? `Paper running · ${state.positions.length} open · ${tw(nowMs())}` : `Ready · ${tw(nowMs())}`);
 }
-const REASON_LABELS = { stop:'止損', trail_stop:'移動停利', tp1:'TP1 出場', time_exit:'到期出場' };
+const REASON_LABELS = { stop:'止損', be_stop:'保本出場', lock_stop:'鎖利出場', trail_stop:'移動停利', tp1:'TP1 出場', time_exit:'到期出場' };
 function buildBreakdown(trades, keyFn){
   const map = {};
   trades.forEach(t => {
