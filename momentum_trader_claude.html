@@ -79,7 +79,7 @@
 </head>
 <body>
 <header>
-  <h1>Claude Momentum Dashboard <span class="subtitle">Binance USD&Ⓜ; · Taiwan time</span></h1>
+  <h1>Claude Momentum Dashboard <span class="subtitle">Binance USDⓂ · Taiwan time</span></h1>
   <div class="controls">
     <button onclick="scanSignals()">Scan Signals</button>
     <button class="ghost" onclick="runBacktest()">Run Backtest</button>
@@ -104,7 +104,7 @@
     <label>Equity <input id="initialEquity" type="number" value="1000" min="100" step="100" style="width:90px"> U</label>
     <label>Risk/trade <input id="riskPct" type="number" value="1" min="0.1" max="5" step="0.1" style="width:54px">%</label>
     <label>Stop <input type="text" value="ATR 1.2x · 3-8%" disabled style="width:130px"></label>
-    <label>TP1 <input type="text" value="2R / 50%" disabled style="width:88px"></label>
+    <label>TP1 <input type="text" value="+27% / 50%" disabled style="width:88px"></label>
     <label>Trail <input type="text" value="ATR 1.5x · min 8%" disabled style="width:134px"></label>
     <label>Storage <input type="text" value="localStorage" disabled style="width:96px"></label>
   </div>
@@ -244,7 +244,6 @@ function updateStatusLine(text){
   const el = document.getElementById('statusLine');
   const dot = document.getElementById('runDot');
   dot.className = 'run-dot' + (state.running ? ' on' : '');
-  // text node after dot
   let textNode = el.childNodes[1];
   if(!textNode || textNode.nodeType !== 3){
     textNode = document.createTextNode('');
@@ -350,7 +349,7 @@ function btcRiskOff(rows){
 function buildRisk(entry, atrValue){
   const stopPct = Math.max(3, Math.min(8, 1.2 * atrValue));
   const stop = entry * (1 - stopPct / 100);
-  const tp1 = entry + 1.5 * (entry - stop);
+  const tp1 = entry * 1.27;
   const trailPct = Math.max(8, 1.5 * atrValue);
   return { stop, tp1, trailPct, stopPct };
 }
@@ -405,7 +404,6 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
   if(volumeRatio >= 3){ score += 5; reasons.push('volume expansion is unusually strong'); }
   if(momentum1h <= 18){ score += 10; reasons.push('not a one-candle runaway move'); } else { score -= 15; reasons.push(`1h move ${momentum1h.toFixed(2)}% is overheated`); }
   if(riskOff){ score -= 12; reasons.push('BTC context risk-off penalty'); }
-  // pullback bonus / chasing penalty / EMA confirmation
   if(isPullback){ score += 18; reasons.push('healthy pullback in uptrend'); }
   if(momentum1h >= 4 && position24h >= 0.85){ score -= 14; reasons.push('penalty: chasing the top'); }
   score += 5; reasons.push('above 50-period EMA with positive slope');
