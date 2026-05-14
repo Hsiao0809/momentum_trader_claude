@@ -146,7 +146,7 @@
       <div class="table-wrap">
         <table>
           <thead><tr>
-            <th class="sym">Symbol</th><th class="left">Strategy</th><th>Entry</th><th>Last</th><th>Δ%</th><th>Unreal U</th><th>Stop</th><th>TP1</th><th>Qty</th><th>Remain</th><th>Risk U</th><th>Score</th><th>Opened</th><th class="left">Reason</th>
+            <th class="sym">Symbol</th><th class="left">Strategy</th><th>多空</th><th>Entry</th><th>Last</th><th>Δ%</th><th>Unreal U</th><th>Stop</th><th>TP1</th><th>Qty</th><th>Remain</th><th>Risk U</th><th>Score</th><th>Opened</th><th class="left">Reason</th>
           </tr></thead>
           <tbody id="positionsBody"></tbody>
         </table>
@@ -171,7 +171,7 @@
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th class="sym">Symbol</th><th class="left">Strategy</th><th>Entry</th><th>Exit</th><th>R</th><th>PnL U</th><th>MFE%</th><th>MAE%</th><th>Score</th><th>時數</th><th>Entry time</th><th>Exit time</th><th class="left">Reason</th>
+          <th class="sym">Symbol</th><th class="left">Strategy</th><th>多空</th><th>Entry</th><th>Exit</th><th>R</th><th>PnL U</th><th>MFE%</th><th>MAE%</th><th>Score</th><th>時數</th><th>Entry time</th><th>Exit time</th><th class="left">Reason</th>
         </tr></thead>
         <tbody id="tradesBody"></tbody>
       </table>
@@ -606,7 +606,7 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
     }
     if(i === lastIndex){ exit = close; exitTime = kTime(bar); realized += remainingQty * (entry - exit); }
   }
-  return { symbol, strategyKey, strategyLabel:LABELS[strategyKey], entryTime:kTime(entryBar), exitTime, entry, exit, qty:sized.qty, pnl:realized, rMultiple:safeDiv(realized, sized.riskUsdt, 0), reason, mfePct:mfe, maePct:mae, score, stop:originalStop, tp1:risk.tp1 };
+  return { symbol, strategyKey, strategyLabel:LABELS[strategyKey], side:'short', entryTime:kTime(entryBar), exitTime, entry, exit, qty:sized.qty, pnl:realized, rMultiple:safeDiv(realized, sized.riskUsdt, 0), reason, mfePct:mfe, maePct:mae, score, stop:originalStop, tp1:risk.tp1 };
 }
 function findIndex(rows, timeMs){ const i = rows.findIndex(k => kTime(k) >= timeMs); return i < 0 ? rows.length - 1 : i; }
 function summarize(trades){
@@ -709,7 +709,7 @@ function closePosition(p, exit, reason, exitTime){
   state.peakEquity = Math.max(state.peakEquity, state.equity);
   const mfePct = (p.entry - (p.lowest || p.entry)) / p.entry * 100;
   const maePct = (p.entry - (p.highest || p.entry)) / p.entry * 100;
-  state.trades.unshift({ symbol:p.symbol, strategyKey:p.strategyKey, strategyLabel:p.strategyLabel, entryTime:p.entryTime, exitTime, entry:p.entry, exit, qty:p.qty, pnl:totalPnl, rMultiple:safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct, maePct, score:p.score });
+  state.trades.unshift({ symbol:p.symbol, strategyKey:p.strategyKey, strategyLabel:p.strategyLabel, side:'short', entryTime:p.entryTime, exitTime, entry:p.entry, exit, qty:p.qty, pnl:totalPnl, rMultiple:safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct, maePct, score:p.score });
   state.equityCurve.push({ timeMs:exitTime, equity:state.equity, drawdownPct:safeDiv(state.peakEquity-state.equity, state.peakEquity, 0)*100 });
   state.consecutiveLosses = totalPnl < 0 ? state.consecutiveLosses + 1 : 0;
   if(state.consecutiveLosses >= 3){ state.pausedUntil = nowMs() + 6*60*60*1000; state.consecutiveLosses = 0; }
@@ -894,14 +894,16 @@ function paintAll(){
     const tp1Cell = p.tp1Done
       ? `<span class="pos">✓ ${fmt(p.tp1,8)}</span>`
       : `<span class="muted">${fmt(p.tp1,8)}</span>`;
-    return `<tr><td class="sym">${symLink(p.symbol)}</td><td class="left">${htmlEscape(p.strategyLabel || p.strategyKey)}</td><td>${fmt(p.entry,8)}</td><td>${lastCell}</td><td>${pctCell}</td><td>${pnlCell}</td><td>${stopCell}</td><td>${tp1Cell}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.remainingQty,4)}</td><td>${fmt(p.riskUsdt,2)}</td><td>${fmt(p.score,0)}</td><td>${tw(p.entryTime)}</td><td class="reason">${htmlEscape((p.reasons||[]).slice(0,3).join(' · '))}</td></tr>`;
-  }).join('') : '<tr><td class="sym muted" colspan="14">No open position</td></tr>';
+    const sideCell = `<span class="neg" style="font-weight:600">空</span>`;
+    return `<tr><td class="sym">${symLink(p.symbol)}</td><td class="left">${htmlEscape(p.strategyLabel || p.strategyKey)}</td><td>${sideCell}</td><td>${fmt(p.entry,8)}</td><td>${lastCell}</td><td>${pctCell}</td><td>${pnlCell}</td><td>${stopCell}</td><td>${tp1Cell}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.remainingQty,4)}</td><td>${fmt(p.riskUsdt,2)}</td><td>${fmt(p.score,0)}</td><td>${tw(p.entryTime)}</td><td class="reason">${htmlEscape((p.reasons||[]).slice(0,3).join(' · '))}</td></tr>`;
+  }).join('') : '<tr><td class="sym muted" colspan="15">No open position</td></tr>';
 
   document.getElementById('tradeSummary').textContent = `${state.trades.length} closed paper trades`;
   document.getElementById('tradesBody').innerHTML = state.trades.length ? state.trades.slice(0,100).map(t => {
     const holdH = (t.exitTime && t.entryTime) ? fmt((t.exitTime - t.entryTime) / 3600000, 1) : '—';
-    return `<tr><td class="sym">${symLink(t.symbol)}</td><td class="left">${htmlEscape(t.strategyLabel || t.strategyKey)}</td><td>${fmt(t.entry,8)}</td><td>${fmt(t.exit,8)}</td><td class="${signedClass(t.rMultiple)}">${fmt(t.rMultiple,2)}</td><td class="${signedClass(t.pnl)}">${fmt(t.pnl,2)}</td><td class="pos">${showPct(t.mfePct)}</td><td class="neg">${showPct(t.maePct)}</td><td>${fmt(t.score,0)}</td><td>${holdH}h</td><td>${tw(t.entryTime)}</td><td>${tw(t.exitTime)}</td><td class="left">${htmlEscape(t.reason)}</td></tr>`;
-  }).join('') : '<tr><td class="sym muted" colspan="13">No closed paper trade</td></tr>';
+    const sideLabel = (t.side || 'long') === 'short' ? '<span class="neg" style="font-weight:600">空</span>' : '<span class="pos" style="font-weight:600">多</span>';
+    return `<tr><td class="sym">${symLink(t.symbol)}</td><td class="left">${htmlEscape(t.strategyLabel || t.strategyKey)}</td><td>${sideLabel}</td><td>${fmt(t.entry,8)}</td><td>${fmt(t.exit,8)}</td><td class="${signedClass(t.rMultiple)}">${fmt(t.rMultiple,2)}</td><td class="${signedClass(t.pnl)}">${fmt(t.pnl,2)}</td><td class="pos">${showPct(t.mfePct)}</td><td class="neg">${showPct(t.maePct)}</td><td>${fmt(t.score,0)}</td><td>${holdH}h</td><td>${tw(t.entryTime)}</td><td>${tw(t.exitTime)}</td><td class="left">${htmlEscape(t.reason)}</td></tr>`;
+  }).join('') : '<tr><td class="sym muted" colspan="14">No closed paper trade</td></tr>';
   paintReview();
 
   drawSpark();
