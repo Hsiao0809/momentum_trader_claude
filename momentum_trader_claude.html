@@ -207,12 +207,11 @@ const FAPI = 'https://fapi.binance.com';
 const INTERVAL_MS = { '15m': 900000 };
 const TZ = 'Asia/Taipei';
 const LABELS = {
-  pullback_uptrend: '上升趨勢回檔',
-  strong_momentum_breakout: '強動量突破追價',
-  volume_ignition: '放量啟動追隨',
-  high_range_continuation: '高位續勢承接',
-  failed_breakout_watch: '假突破風險觀察',
-  narrative_momentum: '題材動量順勢'
+  rally_in_downtrend: '下跌趨勢反彈做空',
+  strong_momentum_breakdown: '強動量崩跌追空',
+  volume_ignition: '放量啟動追空',
+  low_range_continuation: '低位續跌承壓',
+  narrative_momentum: '題材動量做空'
 };
 const CFG = {
   initialEquity: 1000,
@@ -451,33 +450,33 @@ function btcRiskOff(rows){
 }
 function buildRisk(entry, atrValue){
   const stopPct = Math.max(3, Math.min(8, 1.2 * atrValue));
-  const stop = entry * (1 - stopPct / 100);
-  const beTrigger   = entry * 1.08;   // +8%: 止損移至成本
-  const lockTrigger = entry * 1.15;   // +15%: 止損鎖定 +5%
-  const lockLevel   = entry * 1.05;   // 鎖利止損位 = +5%
-  const tp1         = entry * 1.20;   // +20%: 部分出場 + 移動止損啟動
+  const stop      = entry * (1 + stopPct / 100);  // SHORT: 止損在進場價上方
+  const beTrigger   = entry * 0.92;               // 下跌 8%: 保本（止損移至成本）
+  const lockTrigger = entry * 0.85;               // 下跌 15%: 鎖定 +5%
+  const lockLevel   = entry * 0.95;               // 鎖利止損位（成本 -5% = 空頭獲利 +5%）
+  const tp1         = entry * 0.80;               // 下跌 20%: 部分出場 + 移動止損啟動
   const trailPct = Math.max(8, 1.5 * atrValue);
   return { stop, tp1, beTrigger, lockTrigger, lockLevel, trailPct, stopPct };
 }
 function effectiveStopFor(p){
-  const h = p.highest || p.entry;
-  if(p.tp1Done) return Math.max(p.lockLevel || p.entry, h * (1 - p.trailPct / 100));
-  if(p.lockTrigger && h >= p.lockTrigger) return Math.max(p.stop, p.lockLevel || p.entry);
-  if(p.beTrigger  && h >= p.beTrigger)   return Math.max(p.stop, p.entry);
+  const low = p.lowest || p.entry;
+  if(p.tp1Done) return Math.min(p.lockLevel || p.entry, low * (1 + p.trailPct / 100));
+  if(p.lockTrigger && low <= p.lockTrigger) return Math.min(p.stop, p.lockLevel || p.entry);
+  if(p.beTrigger  && low <= p.beTrigger)   return Math.min(p.stop, p.entry);
   return p.stop;
 }
 function stopReasonFor(p){
   if(p.tp1Done) return 'trail_stop';
-  const h = p.highest || p.entry;
-  if(p.lockTrigger && h >= p.lockTrigger) return 'lock_stop';
-  if(p.beTrigger  && h >= p.beTrigger)   return 'be_stop';
+  const low = p.lowest || p.entry;
+  if(p.lockTrigger && low <= p.lockTrigger) return 'lock_stop';
+  if(p.beTrigger  && low <= p.beTrigger)   return 'be_stop';
   return 'stop';
 }
 function strategyKey(m){
-  if(m.isPullback) return 'pullback_uptrend';
-  if((m.momentum4h >= 15 && m.position24h >= 0.80) || (m.momentum24h >= 20 && m.distancePrevHigh >= -2)) return 'strong_momentum_breakout';
-  if(m.momentum24h >= 8 && m.position24h >= 0.75 && m.position24h < 0.92 && m.momentum4h >= -3 && m.momentum4h <= 8) return 'high_range_continuation';
-  if(m.volumeRatio >= 2 && m.position24h >= 0.65 && m.momentum1h > -1) return 'volume_ignition';
+  if(m.isPullback) return 'rally_in_downtrend';
+  if((m.momentum4h <= -15 && m.position24h <= 0.20) || (m.momentum24h <= -20 && m.distancePrevLow <= 2)) return 'strong_momentum_breakdown';
+  if(m.momentum24h <= -8 && m.position24h <= 0.25 && m.position24h > 0.08 && m.momentum4h >= -8 && m.momentum4h <= 3) return 'low_range_continuation';
+  if(m.volumeRatio >= 2 && m.position24h <= 0.35 && m.momentum1h < 1) return 'volume_ignition';
   return 'narrative_momentum';
 }
 function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=false, minScore=CFG.minSignalScore){
@@ -489,48 +488,48 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
   const prev24h = kClose(c[c.length-97]);
   const last24h = c.slice(-96);
   const prev24hBars = c.slice(-97,-1);
-  const prevHigh = Math.max(...prev24hBars.map(kHigh));
+  const prevLow = Math.min(...prev24hBars.map(kLow));
   const momentum1h = pct(prev1h, price) || 0;
   const momentum4h = pct(prev4h, price) || 0;
   const momentum24h = pct(prev24h, price) || 0;
   const position24h = rangePosition(price, last24h.map(kLow), last24h.map(kHigh));
-  const distancePrevHigh = pct(prevHigh, price) || 0;
+  const distancePrevLow = pct(prevLow, price) || 0;
   const volumeRatio = safeDiv(kVol(c[c.length-1]), median(c.slice(-5,-1).map(kVol)), 0);
   const atrValue = atrPct(c);
   const ema50 = ema(c.map(kClose), 50);
   const aboveEma = price > ema50;
   const emaSlope = pct(ema(c.slice(0, -8).map(kClose), 50), ema50) || 0;
 
-  // === HARD REJECTION FILTERS ===
-  if(momentum1h >= 6) return null;
-  if(position24h >= 0.95 && momentum1h > 0) return null;
-  if(momentum24h >= 10 && momentum4h < -1) return null;
-  if(!aboveEma) return null;
-  if(emaSlope < 0) return null;
+  // === HARD REJECTION FILTERS (SHORT) ===
+  if(momentum1h <= -6) return null;
+  if(position24h <= 0.05 && momentum1h < 0) return null;
+  if(momentum24h <= -10 && momentum4h > 1) return null;
+  if(aboveEma) return null;
+  if(emaSlope > 0) return null;
 
-  const isPullback = momentum24h >= 5 && momentum4h >= -1 && momentum1h <= 0.5 && momentum1h >= -3 && position24h >= 0.40 && position24h <= 0.85;
+  const isPullback = momentum24h <= -5 && momentum4h <= 1 && momentum1h >= -0.5 && momentum1h <= 3 && position24h >= 0.15 && position24h <= 0.60;
 
   const risk = buildRisk(price, atrValue);
   let score = 10;
   const reasons = [`24h quote volume ${Math.round(quoteVolume).toLocaleString()} USDT`];
-  if(momentum4h >= 4 || momentum24h >= 8){ score += 20; reasons.push(`momentum confirmed: 4h ${momentum4h.toFixed(2)}%, 24h ${momentum24h.toFixed(2)}%`); }
-  if(momentum4h >= 8){ score += 8; reasons.push(`strong 4h momentum ${momentum4h.toFixed(2)}%`); }
-  if(momentum24h >= 15){ score += 8; reasons.push(`strong 24h momentum ${momentum24h.toFixed(2)}%`); }
-  if(momentum1h > 0){ score += 5; reasons.push(`1h still positive ${momentum1h.toFixed(2)}%`); }
-  if(position24h >= 0.75){ score += 20; reasons.push(`price in top ${(position24h*100).toFixed(1)}% of 24h range`); }
-  if(distancePrevHigh >= -4){ score += 10; reasons.push(`within ${Math.abs(distancePrevHigh).toFixed(2)}% of prior 24h high`); }
-  if(distancePrevHigh > 0){ score += 5; reasons.push('breaking prior 24h high'); }
+  if(momentum4h <= -4 || momentum24h <= -8){ score += 20; reasons.push(`downward momentum confirmed: 4h ${momentum4h.toFixed(2)}%, 24h ${momentum24h.toFixed(2)}%`); }
+  if(momentum4h <= -8){ score += 8; reasons.push(`strong 4h downward momentum ${momentum4h.toFixed(2)}%`); }
+  if(momentum24h <= -15){ score += 8; reasons.push(`strong 24h downward momentum ${momentum24h.toFixed(2)}%`); }
+  if(momentum1h < 0){ score += 5; reasons.push(`1h still falling ${momentum1h.toFixed(2)}%`); }
+  if(position24h <= 0.25){ score += 20; reasons.push(`price in bottom ${((1-position24h)*100).toFixed(1)}% of 24h range`); }
+  if(distancePrevLow <= 4){ score += 10; reasons.push(`within ${Math.abs(distancePrevLow).toFixed(2)}% of prior 24h low`); }
+  if(distancePrevLow < 0){ score += 5; reasons.push('breaking prior 24h low'); }
   if(volumeRatio >= 1.5){ score += 20; reasons.push(`15m volume expansion ${volumeRatio.toFixed(2)}x`); }
   if(volumeRatio >= 3){ score += 5; reasons.push('volume expansion is unusually strong'); }
-  if(momentum1h <= 18){ score += 10; reasons.push('not a one-candle runaway move'); } else { score -= 15; reasons.push(`1h move ${momentum1h.toFixed(2)}% is overheated`); }
-  if(riskOff){ score -= 12; reasons.push('BTC context risk-off penalty'); }
-  // pullback bonus / chasing penalty / EMA confirmation
-  if(isPullback){ score += 18; reasons.push('healthy pullback in uptrend'); }
-  if(momentum1h >= 4 && position24h >= 0.85){ score -= 14; reasons.push('penalty: chasing the top'); }
-  score += 5; reasons.push('above 50-period EMA with positive slope');
+  if(momentum1h >= -18){ score += 10; reasons.push('not a one-candle runaway crash'); } else { score -= 15; reasons.push(`1h crash ${momentum1h.toFixed(2)}% is overextended`); }
+  if(riskOff){ score += 4; reasons.push('BTC risk-off context boost for short'); }
+  // rally-in-downtrend bonus / chasing penalty / EMA confirmation
+  if(isPullback){ score += 18; reasons.push('rally-in-downtrend short setup'); }
+  if(momentum1h <= -4 && position24h <= 0.15){ score -= 14; reasons.push('penalty: chasing the bottom'); }
+  score += 5; reasons.push('below 50-period EMA with negative slope');
   score = Math.round(clamp(score, 0, 100));
   if(score < minScore) return null;
-  const metrics = { momentum1h, momentum4h, momentum24h, position24h, distancePrevHigh, volumeRatio, atrPct:atrValue, stopPct:risk.stopPct, btcRiskOff:riskOff, lastKlineOpenTime:kTime(c[c.length-1]), aboveEma, emaSlope, isPullback };
+  const metrics = { momentum1h, momentum4h, momentum24h, position24h, distancePrevLow, volumeRatio, atrPct:atrValue, stopPct:risk.stopPct, btcRiskOff:riskOff, lastKlineOpenTime:kTime(c[c.length-1]), aboveEma, emaSlope, isPullback };
   const key = strategyKey(metrics);
   return { scannedAt, symbol, score, strategyKey:key, strategyLabel:LABELS[key], entry:price, stop:risk.stop, tp1:risk.tp1, beTrigger:risk.beTrigger, lockTrigger:risk.lockTrigger, lockLevel:risk.lockLevel, trailPct:risk.trailPct, atrPct:atrValue, quoteVolume, reasons, metrics };
 }
@@ -587,24 +586,25 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
   for(let i=entryIndex;i<=lastIndex;i++){
     const bar = rows[i], high = kHigh(bar), low = kLow(bar), close = kClose(bar);
     highest = Math.max(highest, high); lowest = Math.min(lowest, low);
-    mfe = Math.max(mfe, pct(entry, high) || 0); mae = Math.min(mae, pct(entry, low) || 0);
+    mfe = Math.max(mfe, (entry - low)  / entry * 100);  // short: 下跌 = 有利
+    mae = Math.min(mae, (entry - high) / entry * 100);  // short: 上漲 = 不利（負值）
     const effectiveStop = tp1Done
-      ? Math.max(risk.lockLevel, highest * (1 - risk.trailPct / 100))
-      : highest >= risk.lockTrigger ? Math.max(stop, risk.lockLevel)
-      : highest >= risk.beTrigger   ? Math.max(stop, entry)
+      ? Math.min(risk.lockLevel, lowest * (1 + risk.trailPct / 100))
+      : lowest <= risk.lockTrigger ? Math.min(stop, risk.lockLevel)
+      : lowest <= risk.beTrigger   ? Math.min(stop, entry)
       : stop;
-    if(low <= effectiveStop){
-      exit = effectiveStop; exitTime = kTime(bar); realized += remainingQty * (exit - entry);
-      reason = tp1Done ? 'trail_stop' : highest >= risk.lockTrigger ? 'lock_stop' : highest >= risk.beTrigger ? 'be_stop' : 'stop';
+    if(high >= effectiveStop){
+      exit = effectiveStop; exitTime = kTime(bar); realized += remainingQty * (entry - exit);
+      reason = tp1Done ? 'trail_stop' : lowest <= risk.lockTrigger ? 'lock_stop' : lowest <= risk.beTrigger ? 'be_stop' : 'stop';
       break;
     }
-    if(!tp1Done && high >= risk.tp1){
+    if(!tp1Done && low <= risk.tp1){
       const sellQty = remainingQty * 0.5;
-      realized += sellQty * (risk.tp1 - entry);
+      realized += sellQty * (entry - risk.tp1);
       remainingQty -= sellQty;
       tp1Done = true;
     }
-    if(i === lastIndex){ exit = close; exitTime = kTime(bar); realized += remainingQty * (exit - entry); }
+    if(i === lastIndex){ exit = close; exitTime = kTime(bar); realized += remainingQty * (entry - exit); }
   }
   return { symbol, strategyKey, strategyLabel:LABELS[strategyKey], entryTime:kTime(entryBar), exitTime, entry, exit, qty:sized.qty, pnl:realized, rMultiple:safeDiv(realized, sized.riskUsdt, 0), reason, mfePct:mfe, maePct:mae, score, stop:originalStop, tp1:risk.tp1 };
 }
@@ -703,11 +703,13 @@ async function paperTick(){
   } finally { paperTickRunning = false; }
 }
 function closePosition(p, exit, reason, exitTime){
-  const exitPnl = p.remainingQty * (exit - p.entry);
+  const exitPnl = p.remainingQty * (p.entry - exit);  // short PnL
   const totalPnl = (p.realizedPnl || 0) + exitPnl;
   state.equity += exitPnl;
   state.peakEquity = Math.max(state.peakEquity, state.equity);
-  state.trades.unshift({ symbol:p.symbol, strategyKey:p.strategyKey, strategyLabel:p.strategyLabel, entryTime:p.entryTime, exitTime, entry:p.entry, exit, qty:p.qty, pnl:totalPnl, rMultiple:safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct:pct(p.entry,p.highest)||0, maePct:pct(p.entry,p.lowest)||0, score:p.score });
+  const mfePct = (p.entry - (p.lowest || p.entry)) / p.entry * 100;
+  const maePct = (p.entry - (p.highest || p.entry)) / p.entry * 100;
+  state.trades.unshift({ symbol:p.symbol, strategyKey:p.strategyKey, strategyLabel:p.strategyLabel, entryTime:p.entryTime, exitTime, entry:p.entry, exit, qty:p.qty, pnl:totalPnl, rMultiple:safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct, maePct, score:p.score });
   state.equityCurve.push({ timeMs:exitTime, equity:state.equity, drawdownPct:safeDiv(state.peakEquity-state.equity, state.peakEquity, 0)*100 });
   state.consecutiveLosses = totalPnl < 0 ? state.consecutiveLosses + 1 : 0;
   if(state.consecutiveLosses >= 3){ state.pausedUntil = nowMs() + 6*60*60*1000; state.consecutiveLosses = 0; }
@@ -715,7 +717,7 @@ function closePosition(p, exit, reason, exitTime){
 }
 function takeTP1(p){
   const sellQty = p.remainingQty * 0.5;
-  const tpPnl = sellQty * (p.tp1 - p.entry);
+  const tpPnl = sellQty * (p.entry - p.tp1);  // short PnL
   state.equity += tpPnl;
   state.peakEquity = Math.max(state.peakEquity, state.equity);
   p.realizedPnl = (p.realizedPnl || 0) + tpPnl;
@@ -737,11 +739,11 @@ async function updatePositions(){
         p.highest = Math.max(p.highest, high); p.lowest = Math.min(p.lowest, low);
         p.last = close;
         const effectiveStop = effectiveStopFor(p);
-        if(low <= effectiveStop){
+        if(high >= effectiveStop){          // short: 上漲觸及止損
           closePosition(p, effectiveStop, stopReasonFor(p), kTime(bar));
           closed = true; break;
         }
-        if(!p.tp1Done && high >= p.tp1){
+        if(!p.tp1Done && low <= p.tp1){    // short: 下跌觸及 TP1
           takeTP1(p);
         }
         if(kTime(bar) >= p.entryTime + CFG.maxHoldHours*60*60*1000){
@@ -788,13 +790,13 @@ async function refreshMarks(){
       if(state.running){
         const effectiveStop = effectiveStopFor(p);
         const exitReason = stopReasonFor(p);
-        if(price <= effectiveStop){
+        if(price >= effectiveStop){         // short: 上漲觸及止損
           closePosition(p, effectiveStop, exitReason, nowMs());
           const reasonLabel = {stop:'止損',be_stop:'保本出場',lock_stop:'鎖利出場',trail_stop:'移動停利'}[exitReason] || exitReason;
           log(`即時出場 · ${p.symbol} @ ${fmt(effectiveStop,8)} (${reasonLabel})`);
           return;
         }
-        if(!p.tp1Done && price >= p.tp1){
+        if(!p.tp1Done && price <= p.tp1){  // short: 下跌觸及 TP1
           takeTP1(p);
           log(`TP1 觸發 · ${p.symbol} @ ${fmt(p.tp1,8)}`);
         }
@@ -818,8 +820,8 @@ function statsFromTrades(trades){
 }
 function unrealizedFor(p){
   if(!p.last || !p.entry) return { pnl:null, pct:null };
-  const pnl = (p.remainingQty || p.qty) * (p.last - p.entry) + (p.realizedPnl || 0);
-  return { pnl, pct: pct(p.entry, p.last) };
+  const pnl = (p.remainingQty || p.qty) * (p.entry - p.last) + (p.realizedPnl || 0);  // short
+  return { pnl, pct: (p.entry - p.last) / p.entry * 100 };
 }
 function drawSpark(){
   const svg = document.getElementById('equitySpark');
@@ -881,12 +883,12 @@ function paintAll(){
     const pctCell = u.pct === null ? '<span class="muted">—</span>' : `<span class="${signedClass(u.pct)}">${showPct(u.pct)}</span>`;
     const pnlCell = u.pnl === null ? '<span class="muted">—</span>' : `<span class="${signedClass(u.pnl)}">${fmt(u.pnl,2)}</span>`;
     const effectiveStop = effectiveStopFor(p);
-    const h_ = p.highest || p.entry;
+    const low_ = p.lowest || p.entry;
     const stopCell = p.tp1Done
       ? `<span class="pill live" style="font-size:.65rem;margin-right:2px">移</span><span class="pos">${fmt(effectiveStop,8)}</span>`
-      : h_ >= (p.lockTrigger||Infinity)
+      : low_ <= (p.lockTrigger||0)
       ? `<span class="pill live" style="font-size:.65rem;margin-right:2px">鎖</span><span class="pos">${fmt(effectiveStop,8)}</span>`
-      : h_ >= (p.beTrigger||Infinity)
+      : low_ <= (p.beTrigger||0)
       ? `<span class="pill live" style="font-size:.65rem;margin-right:2px">保</span><span class="pos">${fmt(effectiveStop,8)}</span>`
       : `<span class="neg">${fmt(p.stop,8)}</span>`;
     const tp1Cell = p.tp1Done
