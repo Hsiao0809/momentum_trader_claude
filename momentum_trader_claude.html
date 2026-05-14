@@ -207,11 +207,11 @@ const FAPI = 'https://fapi.binance.com';
 const INTERVAL_MS = { '15m': 900000 };
 const TZ = 'Asia/Taipei';
 const LABELS = {
-  rally_in_downtrend: '下跌趨勢反彈做空',
-  strong_momentum_breakdown: '強動量崩跌追空',
-  volume_ignition: '放量啟動追空',
-  low_range_continuation: '低位續跌承壓',
-  narrative_momentum: '題材動量做空'
+  pullback_uptrend: '上升趨勢回檔（空）',
+  strong_momentum_breakout: '強動量突破（空）',
+  volume_ignition: '放量啟動（空）',
+  high_range_continuation: '高位續勢（空）',
+  narrative_momentum: '題材動量（空）'
 };
 const CFG = {
   initialEquity: 1000,
@@ -473,10 +473,10 @@ function stopReasonFor(p){
   return 'stop';
 }
 function strategyKey(m){
-  if(m.isPullback) return 'rally_in_downtrend';
-  if((m.momentum4h <= -15 && m.position24h <= 0.20) || (m.momentum24h <= -20 && m.distancePrevLow <= 2)) return 'strong_momentum_breakdown';
-  if(m.momentum24h <= -8 && m.position24h <= 0.25 && m.position24h > 0.08 && m.momentum4h >= -8 && m.momentum4h <= 3) return 'low_range_continuation';
-  if(m.volumeRatio >= 2 && m.position24h <= 0.35 && m.momentum1h < 1) return 'volume_ignition';
+  if(m.isPullback) return 'pullback_uptrend';
+  if((m.momentum4h >= 15 && m.position24h >= 0.80) || (m.momentum24h >= 20 && m.distancePrevHigh >= -2)) return 'strong_momentum_breakout';
+  if(m.momentum24h >= 8 && m.position24h >= 0.75 && m.position24h < 0.92 && m.momentum4h >= -3 && m.momentum4h <= 8) return 'high_range_continuation';
+  if(m.volumeRatio >= 2 && m.position24h >= 0.65 && m.momentum1h > -1) return 'volume_ignition';
   return 'narrative_momentum';
 }
 function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=false, minScore=CFG.minSignalScore){
@@ -488,48 +488,48 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
   const prev24h = kClose(c[c.length-97]);
   const last24h = c.slice(-96);
   const prev24hBars = c.slice(-97,-1);
-  const prevLow = Math.min(...prev24hBars.map(kLow));
+  const prevHigh = Math.max(...prev24hBars.map(kHigh));
   const momentum1h = pct(prev1h, price) || 0;
   const momentum4h = pct(prev4h, price) || 0;
   const momentum24h = pct(prev24h, price) || 0;
   const position24h = rangePosition(price, last24h.map(kLow), last24h.map(kHigh));
-  const distancePrevLow = pct(prevLow, price) || 0;
+  const distancePrevHigh = pct(prevHigh, price) || 0;
   const volumeRatio = safeDiv(kVol(c[c.length-1]), median(c.slice(-5,-1).map(kVol)), 0);
   const atrValue = atrPct(c);
   const ema50 = ema(c.map(kClose), 50);
   const aboveEma = price > ema50;
   const emaSlope = pct(ema(c.slice(0, -8).map(kClose), 50), ema50) || 0;
 
-  // === HARD REJECTION FILTERS (SHORT) ===
-  if(momentum1h <= -6) return null;
-  if(position24h <= 0.05 && momentum1h < 0) return null;
-  if(momentum24h <= -10 && momentum4h > 1) return null;
-  if(aboveEma) return null;
-  if(emaSlope > 0) return null;
+  // === HARD REJECTION FILTERS ===
+  if(momentum1h >= 6) return null;
+  if(position24h >= 0.95 && momentum1h > 0) return null;
+  if(momentum24h >= 10 && momentum4h < -1) return null;
+  if(!aboveEma) return null;
+  if(emaSlope < 0) return null;
 
-  const isPullback = momentum24h <= -5 && momentum4h <= 1 && momentum1h >= -0.5 && momentum1h <= 3 && position24h >= 0.15 && position24h <= 0.60;
+  const isPullback = momentum24h >= 5 && momentum4h >= -1 && momentum1h <= 0.5 && momentum1h >= -3 && position24h >= 0.40 && position24h <= 0.85;
 
   const risk = buildRisk(price, atrValue);
   let score = 10;
   const reasons = [`24h quote volume ${Math.round(quoteVolume).toLocaleString()} USDT`];
-  if(momentum4h <= -4 || momentum24h <= -8){ score += 20; reasons.push(`downward momentum confirmed: 4h ${momentum4h.toFixed(2)}%, 24h ${momentum24h.toFixed(2)}%`); }
-  if(momentum4h <= -8){ score += 8; reasons.push(`strong 4h downward momentum ${momentum4h.toFixed(2)}%`); }
-  if(momentum24h <= -15){ score += 8; reasons.push(`strong 24h downward momentum ${momentum24h.toFixed(2)}%`); }
-  if(momentum1h < 0){ score += 5; reasons.push(`1h still falling ${momentum1h.toFixed(2)}%`); }
-  if(position24h <= 0.25){ score += 20; reasons.push(`price in bottom ${((1-position24h)*100).toFixed(1)}% of 24h range`); }
-  if(distancePrevLow <= 4){ score += 10; reasons.push(`within ${Math.abs(distancePrevLow).toFixed(2)}% of prior 24h low`); }
-  if(distancePrevLow < 0){ score += 5; reasons.push('breaking prior 24h low'); }
+  if(momentum4h >= 4 || momentum24h >= 8){ score += 20; reasons.push(`momentum confirmed: 4h ${momentum4h.toFixed(2)}%, 24h ${momentum24h.toFixed(2)}%`); }
+  if(momentum4h >= 8){ score += 8; reasons.push(`strong 4h momentum ${momentum4h.toFixed(2)}%`); }
+  if(momentum24h >= 15){ score += 8; reasons.push(`strong 24h momentum ${momentum24h.toFixed(2)}%`); }
+  if(momentum1h > 0){ score += 5; reasons.push(`1h still positive ${momentum1h.toFixed(2)}%`); }
+  if(position24h >= 0.75){ score += 20; reasons.push(`price in top ${(position24h*100).toFixed(1)}% of 24h range`); }
+  if(distancePrevHigh >= -4){ score += 10; reasons.push(`within ${Math.abs(distancePrevHigh).toFixed(2)}% of prior 24h high`); }
+  if(distancePrevHigh > 0){ score += 5; reasons.push('breaking prior 24h high'); }
   if(volumeRatio >= 1.5){ score += 20; reasons.push(`15m volume expansion ${volumeRatio.toFixed(2)}x`); }
   if(volumeRatio >= 3){ score += 5; reasons.push('volume expansion is unusually strong'); }
-  if(momentum1h >= -18){ score += 10; reasons.push('not a one-candle runaway crash'); } else { score -= 15; reasons.push(`1h crash ${momentum1h.toFixed(2)}% is overextended`); }
-  if(riskOff){ score += 4; reasons.push('BTC risk-off context boost for short'); }
-  // rally-in-downtrend bonus / chasing penalty / EMA confirmation
-  if(isPullback){ score += 18; reasons.push('rally-in-downtrend short setup'); }
-  if(momentum1h <= -4 && position24h <= 0.15){ score -= 14; reasons.push('penalty: chasing the bottom'); }
-  score += 5; reasons.push('below 50-period EMA with negative slope');
+  if(momentum1h <= 18){ score += 10; reasons.push('not a one-candle runaway move'); } else { score -= 15; reasons.push(`1h move ${momentum1h.toFixed(2)}% is overheated`); }
+  if(riskOff){ score -= 12; reasons.push('BTC context risk-off penalty'); }
+  // pullback bonus / chasing penalty / EMA confirmation
+  if(isPullback){ score += 18; reasons.push('healthy pullback in uptrend'); }
+  if(momentum1h >= 4 && position24h >= 0.85){ score -= 14; reasons.push('penalty: chasing the top'); }
+  score += 5; reasons.push('above 50-period EMA with positive slope');
   score = Math.round(clamp(score, 0, 100));
   if(score < minScore) return null;
-  const metrics = { momentum1h, momentum4h, momentum24h, position24h, distancePrevLow, volumeRatio, atrPct:atrValue, stopPct:risk.stopPct, btcRiskOff:riskOff, lastKlineOpenTime:kTime(c[c.length-1]), aboveEma, emaSlope, isPullback };
+  const metrics = { momentum1h, momentum4h, momentum24h, position24h, distancePrevHigh, volumeRatio, atrPct:atrValue, stopPct:risk.stopPct, btcRiskOff:riskOff, lastKlineOpenTime:kTime(c[c.length-1]), aboveEma, emaSlope, isPullback };
   const key = strategyKey(metrics);
   return { scannedAt, symbol, score, strategyKey:key, strategyLabel:LABELS[key], entry:price, stop:risk.stop, tp1:risk.tp1, beTrigger:risk.beTrigger, lockTrigger:risk.lockTrigger, lockLevel:risk.lockLevel, trailPct:risk.trailPct, atrPct:atrValue, quoteVolume, reasons, metrics };
 }
@@ -568,7 +568,7 @@ async function scanSignals(){
 }
 function positionSize(equity, entry, stop){
   const riskUsdt = equity * CFG.riskPerTrade;
-  const perUnitRisk = Math.max(entry - stop, entry * 0.001);
+  const perUnitRisk = Math.max(Math.abs(entry - stop), entry * 0.001);
   return { qty: riskUsdt / perUnitRisk, riskUsdt };
 }
 function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
