@@ -23,6 +23,14 @@ const DEFAULT_CFG = {
   cooldownBars: 96,
   symbolStopCooldownMs: 24 * 60 * 60 * 1000,
   scanLimit: 35,
+  maxKlineScans: 28,
+  anomalyScanLimit: 20,
+  coreScanLimit: 6,
+  coreScanEveryMs: 30 * 60 * 1000,
+  extendedScanStart: 35,
+  extendedScanEnd: 160,
+  extendedScanBatch: 8,
+  scanRequestDelayMs: 120,
   scanStaleMs: 5 * 60 * 1000,
 };
 
@@ -133,10 +141,11 @@ async function runPaperTick(env, options = {}) {
       return;
     }
 
-    await updatePositions(state);
-
     const scanStale = !state.signals.length || now - (state.lastScanAt || 0) > state.cfg.scanStaleMs;
-    if (options.forceScan || scanStale) {
+    const willScan = options.forceScan || scanStale;
+    await updatePositions(state, { markToMarket: !willScan });
+
+    if (willScan) {
       state.signals = await scanSignals(state);
       state.lastScanAt = Date.now();
     }
@@ -183,6 +192,10 @@ function defaultState() {
     equityCurve: [],
     backtest: null,
     lastScanAt: 0,
+    lastCoreScanAt: 0,
+    scanCursor: 0,
+    scanMeta: null,
+    tickerSnapshot: null,
     lastRunAt: 0,
     lastError: null,
     marketProvider: 'okx-usdt-swap',
@@ -192,6 +205,10 @@ function defaultState() {
 
 function normalizeState(state) {
   const cfg = { ...DEFAULT_CFG, ...(state.cfg || {}) };
+  cfg.maxKlineScans = Math.min(positiveInt(cfg.maxKlineScans, DEFAULT_CFG.maxKlineScans), DEFAULT_CFG.maxKlineScans);
+  cfg.anomalyScanLimit = Math.min(positiveInt(cfg.anomalyScanLimit, DEFAULT_CFG.anomalyScanLimit), DEFAULT_CFG.anomalyScanLimit);
+  cfg.coreScanLimit = Math.min(positiveInt(cfg.coreScanLimit, DEFAULT_CFG.coreScanLimit), DEFAULT_CFG.coreScanLimit);
+  cfg.scanRequestDelayMs = Math.max(positiveInt(cfg.scanRequestDelayMs, DEFAULT_CFG.scanRequestDelayMs), DEFAULT_CFG.scanRequestDelayMs);
   if (typeof state.initialEquity === 'number') cfg.initialEquity = state.initialEquity;
   if (typeof state.riskPerTrade === 'number') cfg.riskPerTrade = state.riskPerTrade;
   return {
@@ -227,22 +244,29 @@ function applyConfig(state, body = {}) {
 
 async function scanSignals(state) {
   const cfg = state.cfg;
-  const tickers = await topInstruments(cfg.scanLimit);
-  const btcRows = await klines('BTC-USDT-SWAP', '15m', 130);
-  const riskOff = btcRiskOff(btcRows);
+  const { tickers, meta } = await scanUniverse(state);
+  let riskOff = false;
+  try {
+    const btcRows = await klines('BTC-USDT-SWAP', '15m', 130);
+    riskOff = btcRiskOff(btcRows);
+  } catch (error) {
+    console.warn('BTC risk context failed', error);
+  }
   const signals = [];
 
   for (const ticker of tickers) {
     try {
       const rows = await klines(ticker.instId, '15m', 130);
       const sig = evaluateSignal(ticker.symbol, ticker.instId, rows, ticker.quoteVolumeFloat, Date.now(), riskOff, cfg);
-      if (sig) signals.push(sig);
+      if (sig) signals.push({ ...sig, universeTier: ticker.universeTier, universeRank: ticker.rank });
     } catch (error) {
       console.warn('scan failed', ticker.instId, error);
     }
-    await sleep(20);
+    await sleep(positiveInt(cfg.scanRequestDelayMs, 120));
   }
 
+  state.scanCursor = meta.nextCursor;
+  state.scanMeta = { ...meta, scannedAt: Date.now(), scannedCount: tickers.length, signalCount: signals.length };
   return signals.sort((a, b) => b.score - a.score || b.quoteVolume - a.quoteVolume);
 }
 
@@ -296,8 +320,9 @@ function openNewPositions(state) {
   }
 }
 
-async function updatePositions(state) {
+async function updatePositions(state, options = {}) {
   if (!state.positions.length) return;
+  const markToMarket = options.markToMarket !== false;
   const stillOpen = [];
 
   for (const p of state.positions) {
@@ -330,7 +355,7 @@ async function updatePositions(state) {
         }
       }
 
-      if (!closed) {
+      if (!closed && markToMarket) {
         const price = await tickerPrice(p.instId || instIdFromSymbol(p.symbol));
         p.last = price;
         p.highest = Math.max(p.highest || p.entry, price);
@@ -353,19 +378,82 @@ async function updatePositions(state) {
   state.positions = stillOpen;
 }
 
-async function topInstruments(limit) {
+async function scanUniverse(state) {
+  const cfg = state.cfg;
+  const maxKlineScans = positiveInt(cfg.maxKlineScans || cfg.scanLimit, 35);
+  const anomalyLimit = positiveInt(cfg.anomalyScanLimit, 24);
+  const coreLimit = positiveInt(cfg.coreScanLimit, 10);
+  const coreScanEveryMs = positiveInt(cfg.coreScanEveryMs, 30 * 60 * 1000);
+  const extendedStart = positiveInt(cfg.extendedScanStart, 35);
+  const extendedEnd = Math.max(extendedStart, positiveInt(cfg.extendedScanEnd, 120));
+  const extendedBatch = Math.max(0, positiveInt(cfg.extendedScanBatch, 8));
+  const ranked = await rankedInstruments(cfg);
+  const previousSnapshot = state.tickerSnapshot?.items || {};
+  const scored = ranked.map((ticker) => ({
+    ...ticker,
+    anomalyScore: anomalyScore(ticker, previousSnapshot[ticker.instId]),
+  }));
+  const anomaly = scored
+    .filter((ticker) => ticker.rank > coreLimit || ticker.anomalyScore >= 20)
+    .sort((a, b) => b.anomalyScore - a.anomalyScore || b.quoteVolumeFloat - a.quoteVolumeFloat)
+    .slice(0, anomalyLimit)
+    .map((ticker) => ({ ...ticker, universeTier: 'anomaly' }));
+
+  const now = Date.now();
+  const coreDue = !state.lastCoreScanAt || now - state.lastCoreScanAt >= coreScanEveryMs;
+  const core = coreDue
+    ? ranked.slice(0, coreLimit).map((ticker) => ({ ...ticker, universeTier: 'core' }))
+    : [];
+
+  const pool = ranked.slice(extendedStart, extendedEnd);
+  const cursor = Number.isFinite(Number(state.scanCursor)) ? Number(state.scanCursor) : 0;
+  const extended = rotatingSlice(pool, cursor, extendedBatch).map((ticker) => ({ ...ticker, universeTier: 'extended' }));
+  const nextCursor = pool.length && extendedBatch ? (cursor + extendedBatch) % pool.length : 0;
+  const deduped = [...new Map([...anomaly, ...extended, ...core].map((ticker) => [ticker.instId, ticker])).values()]
+    .slice(0, maxKlineScans);
+
+  if (coreDue && deduped.some((ticker) => ticker.universeTier === 'core')) state.lastCoreScanAt = now;
+  state.tickerSnapshot = buildTickerSnapshot(ranked);
+
+  return {
+    tickers: deduped,
+    meta: {
+      mode: 'anomaly-first',
+      maxKlineScans,
+      anomalyLimit,
+      anomalyCandidates: anomaly.length,
+      coreLimit,
+      coreDue,
+      coreScanned: deduped.filter((ticker) => ticker.universeTier === 'core').length,
+      coreScanEveryMs,
+      extendedStart,
+      extendedEnd,
+      extendedBatch,
+      extendedPoolSize: pool.length,
+      cursor,
+      nextCursor,
+    },
+  };
+}
+
+async function rankedInstruments(cfg) {
   const tickers = await okx('/api/v5/market/tickers', { instType: 'SWAP' });
   return tickers
     .filter((t) => t.instId && t.instId.endsWith('-USDT-SWAP'))
     .map((t) => {
       const last = Number(t.last || 0);
+      const open24h = Number(t.open24h || 0);
+      const high24h = Number(t.high24h || 0);
+      const low24h = Number(t.low24h || 0);
       const baseVolume = Number(t.volCcy24h || 0);
       const quoteVolumeFloat = last * baseVolume;
-      return { instId: t.instId, symbol: symbolFromInstId(t.instId), quoteVolumeFloat };
+      const change24h = open24h ? (last / open24h - 1) * 100 : 0;
+      const range24hPosition = high24h > low24h ? (last - low24h) / (high24h - low24h) : 0.5;
+      return { instId: t.instId, symbol: symbolFromInstId(t.instId), last, open24h, high24h, low24h, change24h, range24hPosition, quoteVolumeFloat };
     })
-    .filter((t) => t.quoteVolumeFloat >= DEFAULT_CFG.minQuoteVolume)
+    .filter((t) => t.quoteVolumeFloat >= cfg.minQuoteVolume)
     .sort((a, b) => b.quoteVolumeFloat - a.quoteVolumeFloat)
-    .slice(0, limit);
+    .map((ticker, index) => ({ ...ticker, rank: index + 1 }));
 }
 
 async function tickerPrice(instId) {
@@ -381,7 +469,7 @@ async function klines(instId, interval = '15m', limit = 130) {
     .sort((a, b) => a[0] - b[0]);
 }
 
-async function okx(path, params = {}) {
+async function okx(path, params = {}, attempt = 0) {
   const url = new URL(path, OKX_API);
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null) url.searchParams.set(key, value);
@@ -393,6 +481,10 @@ async function okx(path, params = {}) {
     },
     cf: { cacheTtl: 0 },
   });
+  if ((response.status === 429 || response.status >= 500) && attempt < 2) {
+    await sleep(500 * (attempt + 1));
+    return okx(path, params, attempt + 1);
+  }
   if (!response.ok) throw new Error(`OKX ${path} ${response.status}`);
   const payload = await response.json();
   if (payload.code && payload.code !== '0') throw new Error(`OKX ${path} ${payload.code}: ${payload.msg}`);
@@ -569,6 +661,50 @@ function symbolFromInstId(instId) {
 
 function instIdFromSymbol(symbol) {
   return `${symbol.replace(/USDT$/, '')}-USDT-SWAP`;
+}
+
+function anomalyScore(ticker, previous) {
+  const positiveChange = Math.max(0, ticker.change24h || 0);
+  const rangePressure = Math.max(0, (ticker.range24hPosition || 0.5) - 0.65) * 100;
+  const rankJump = previous?.rank ? Math.max(0, previous.rank - ticker.rank) : 0;
+  const quoteVolumeGrowthPct = previous?.quoteVolumeFloat
+    ? Math.max(0, (ticker.quoteVolumeFloat / previous.quoteVolumeFloat - 1) * 100)
+    : 0;
+  const liquidityWeight = Math.max(0, Math.log10(Math.max(ticker.quoteVolumeFloat, 1) / 1_000_000));
+
+  return positiveChange * 2
+    + rangePressure * 1.2
+    + Math.min(rankJump, 50) * 1.5
+    + Math.min(quoteVolumeGrowthPct, 250) * 0.35
+    + liquidityWeight * 2;
+}
+
+function buildTickerSnapshot(ranked) {
+  const items = {};
+  for (const ticker of ranked.slice(0, 240)) {
+    items[ticker.instId] = {
+      rank: ticker.rank,
+      last: ticker.last,
+      change24h: ticker.change24h,
+      range24hPosition: ticker.range24hPosition,
+      quoteVolumeFloat: ticker.quoteVolumeFloat,
+    };
+  }
+  return { savedAt: Date.now(), items };
+}
+
+function rotatingSlice(items, cursor, size) {
+  if (!items.length || !size) return [];
+  const out = [];
+  for (let i = 0; i < Math.min(size, items.length); i++) {
+    out.push(items[(cursor + i) % items.length]);
+  }
+  return out;
+}
+
+function positiveInt(value, fallback) {
+  const parsed = Math.floor(Number(value));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function kHigh(k) { return Number(k[2]); }

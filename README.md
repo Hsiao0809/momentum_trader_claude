@@ -19,6 +19,7 @@ The browser dashboard is only the UI. Continuous paper trading runs in `worker/s
 - State storage: Cloudflare KV binding `PAPER_STATE`
 - Market data: OKX USDT perpetual swaps
 - Public API: `https://momentum-trader-claude-runner.siaosiao1016.workers.dev`
+- Signal discovery: anomaly-first scan. Each scan uses a full OKX swap ticker snapshot, then spends K-line requests on abnormal candidates first: strong 24h change, high 24h range position, volume-rank jump, and quote-volume growth. Each scan is capped at 28 K-line requests, with up to 20 anomaly candidates; core high-liquidity symbols are only sampled every 30 minutes.
 
 Binance Futures works from the browser, but Binance blocks Cloudflare Workers/Pages Functions from fetching the Futures API with a `403`, so the always-on runner uses OKX public swap market data instead.
 
