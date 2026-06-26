@@ -113,6 +113,12 @@ async function handleRequest(request, env) {
       return json({ ok: true, state: await loadState(env) });
     }
 
+    if (request.method === 'POST' && url.pathname === '/notify/test') {
+      const state = await loadState(env);
+      const notification = await sendNotification(env, 'Claude Momentum 測試通知\nWorker 通知通道已連線。', { type: 'test', state });
+      return json({ ok: true, notification });
+    }
+
     return json({ ok: false, error: 'Not found' }, 404);
   } catch (error) {
     const state = await loadState(env).catch(() => null);
@@ -151,7 +157,7 @@ async function runPaperTick(env, options = {}) {
     }
 
     if (state.running && !options.onlyScan) {
-      openNewPositions(state);
+      await openNewPositions(state, env);
     }
 
     state.lastError = null;
@@ -282,7 +288,7 @@ async function scanSignals(state) {
   return signals.sort((a, b) => b.score - a.score || b.quoteVolume - a.quoteVolume);
 }
 
-function openNewPositions(state) {
+async function openNewPositions(state, env) {
   const cfg = state.cfg;
   if (state.pausedUntil && Date.now() < state.pausedUntil) return;
 
@@ -299,7 +305,7 @@ function openNewPositions(state) {
     const sized = positionSize(state.equity, sig.entry, sig.stop, cfg);
     if (totalRisk + sized.riskUsdt > state.equity * cfg.maxTotalRisk) break;
 
-    state.positions.push({
+    const position = {
       id: `p_${Date.now()}_${sig.symbol}`,
       symbol: sig.symbol,
       instId: sig.instId,
@@ -326,9 +332,11 @@ function openNewPositions(state) {
       riskUsdt: sized.riskUsdt,
       realizedPnl: 0,
       reasons: sig.reasons,
-    });
+    };
+    state.positions.push(position);
     totalRisk += sized.riskUsdt;
     openSymbols.add(sig.symbol);
+    await notifyNewPosition(env, position, state);
   }
 }
 
@@ -589,6 +597,82 @@ function takeTP1(state, p) {
   p.stop = p.entry;
 }
 
+async function notifyNewPosition(env, position, state) {
+  const sideText = position.side === 'short' ? '空單' : '多單';
+  const reasons = (position.reasons || []).slice(0, 3).join('\n- ');
+  const message = [
+    `新模擬單：${position.symbol} ${sideText}`,
+    `策略：${position.strategyLabel || position.strategyKey}`,
+    `分數：${position.score}`,
+    `進場：${fmtNumber(position.entry, 8)}`,
+    `停損：${fmtNumber(position.stop, 8)}`,
+    `TP1：${fmtNumber(position.tp1, 8)}`,
+    `風險：${fmtNumber(position.riskUsdt, 2)} U`,
+    reasons ? `理由：\n- ${reasons}` : '',
+    `時間：${new Date(position.entryTime).toISOString()}`,
+  ].filter(Boolean).join('\n');
+
+  await sendNotification(env, message, { type: 'new_position', position, equity: state.equity });
+}
+
+async function sendNotification(env, text, payload = {}) {
+  const tasks = [];
+
+  if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
+    tasks.push({
+      channel: 'telegram',
+      request: fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: env.TELEGRAM_CHAT_ID,
+          text,
+          disable_web_page_preview: true,
+        }),
+      }),
+    });
+  }
+
+  if (env.DISCORD_WEBHOOK_URL) {
+    tasks.push({
+      channel: 'discord',
+      request: fetch(env.DISCORD_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: text }),
+      }),
+    });
+  }
+
+  if (env.NOTIFY_WEBHOOK_URL) {
+    tasks.push({
+      channel: 'webhook',
+      request: fetch(env.NOTIFY_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, ...payload }),
+      }),
+    });
+  }
+
+  if (!tasks.length) return { configured: 0, sent: 0, failures: [] };
+
+  const results = await Promise.allSettled(tasks.map((task) => task.request));
+  const failures = [];
+  for (const [index, result] of results.entries()) {
+    const channel = tasks[index].channel;
+    if (result.status === 'rejected') {
+      failures.push({ channel, error: String(result.reason) });
+      console.warn('notification failed', channel, result.reason);
+    } else if (!result.value.ok) {
+      const body = await result.value.text().catch(() => '');
+      failures.push({ channel, status: result.value.status, body: body.slice(0, 500) });
+      console.warn('notification failed', channel, result.value.status, body);
+    }
+  }
+  return { configured: tasks.length, sent: tasks.length - failures.length, failures };
+}
+
 function buildRisk(entry, atrValue, side = 'long') {
   const stopPct = Math.max(3, Math.min(8, 1.2 * atrValue));
   const trailPct = Math.max(8, 1.5 * atrValue);
@@ -728,6 +812,11 @@ function pct(a, b) { return !a || b === null || b === undefined ? null : (b / a 
 function safeDiv(a, b, def = 0) { return !b || a === null || a === undefined ? def : a / b; }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+function fmtNumber(value, digits = 4) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return String(value ?? '');
+  return number.toLocaleString('en-US', { maximumFractionDigits: digits });
+}
 function mean(xs) { return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0; }
 function median(xs) {
   if (!xs.length) return 0;
