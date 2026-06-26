@@ -1,0 +1,13 @@
+{
+  "name": "momentum-trader-claude",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "npm run build && npx wrangler pages dev dist",
+    "deploy": "npm run build && npx wrangler pages deploy dist --project-name momentum-trader-claude",
+    "worker:deploy": "npx wrangler deploy --config worker/wrangler.toml",
+    "worker:tail": "npx wrangler tail momentum-trader-claude-runner",
+    "deploy:all": "npm run worker:deploy && npm run deploy"
+  }
+}

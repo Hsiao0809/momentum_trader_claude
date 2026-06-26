@@ -1,0 +1,11 @@
+name = "momentum-trader-claude-runner"
+main = "src/index.js"
+compatibility_date = "2026-06-26"
+workers_dev = true
+
+[triggers]
+crons = ["* * * * *"]
+
+[[kv_namespaces]]
+binding = "PAPER_STATE"
+id = "320b0704920745398c1c73d072beb5c3"

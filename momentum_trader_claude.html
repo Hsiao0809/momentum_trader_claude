@@ -106,12 +106,11 @@
     <label>Stop <input type="text" value="ATR 1.2x · 3-8%" disabled style="width:130px"></label>
     <label>止損升級 <input type="text" value="保+8% · 鎖+15% · TP+20%" disabled style="width:160px"></label>
     <label>Trail <input type="text" value="ATR 1.5x · min 8%" disabled style="width:134px"></label>
-    <label>Storage <input type="text" value="localStorage + Gist" disabled style="width:130px"></label>
+    <label>Storage <input type="text" value="Cloudflare KV + Cron" disabled style="width:150px"></label>
   </div>
   <div class="controls" style="margin-top:8px">
-    <label>GitHub Token <input id="ghToken" type="password" placeholder="ghp_..." style="width:180px"></label>
-    <label>Gist ID <input id="ghGistId" type="text" placeholder="留空自動建立" style="width:210px"></label>
-    <button class="ghost" onclick="syncNow()">☁ 立即同步</button>
+    <label>Worker <input id="workerUrl" type="text" value="momentum-trader-claude-runner" disabled style="width:260px"></label>
+    <button class="ghost" onclick="syncNow()">Refresh Worker</button>
     <span id="syncStatus" class="status" style="min-width:200px"></span>
   </div>
 </header>
@@ -204,6 +203,8 @@
 
 <script>
 const FAPI = 'https://fapi.binance.com';
+const PAPER_API = 'https://momentum-trader-claude-runner.siaosiao1016.workers.dev';
+const SERVER_MODE = Boolean(PAPER_API);
 const INTERVAL_MS = { '15m': 900000 };
 const TZ = 'Asia/Taipei';
 const LABELS = {
@@ -238,7 +239,10 @@ function twFull(ms){
   if(!ms) return '';
   return new Date(ms).toLocaleString('zh-TW', { timeZone:TZ, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
 }
-function tvHref(sym){ return `https://www.tradingview.com/chart/?symbol=BINANCE:${encodeURIComponent(sym)}.P`; }
+function tvHref(sym){
+  const exchange = state?.marketProvider === 'okx-usdt-swap' ? 'OKX' : 'BINANCE';
+  return `https://www.tradingview.com/chart/?symbol=${exchange}:${encodeURIComponent(sym)}.P`;
+}
 function fmt(n, d=4){ return n === null || n === undefined || n === '' ? '' : Number(n).toLocaleString(undefined, {maximumFractionDigits:d}); }
 function pct(a,b){ return !a || b === null || b === undefined ? null : (b / a - 1) * 100; }
 function safeDiv(a,b,def=0){ return !b || a === null || a === undefined ? def : a / b; }
@@ -358,7 +362,7 @@ function debouncedCloudSave(){
   cloudSaveTimer = setTimeout(pushToCloud, 30000);
 }
 
-function syncNow(){ clearTimeout(cloudSaveTimer); pushToCloud(); }
+function syncNow(){ return syncServerState(true); }
 
 function setupCloudSync(){
   const tokenEl = document.getElementById('ghToken');
@@ -376,6 +380,56 @@ function setupCloudSync(){
   gistEl?.addEventListener('change', persist);
 }
 // ─────────────────────────────────────────────────────────────────────────────
+
+async function serverRequest(path, options={}){
+  if(!SERVER_MODE) throw new Error('Worker API is not configured.');
+  const res = await fetch(`${PAPER_API}${path}`, {
+    method: options.method || 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    body: options.body ? JSON.stringify(options.body) : undefined,
+    cache: 'no-store'
+  });
+  const data = await res.json().catch(() => ({}));
+  if(!res.ok || data.ok === false) throw new Error(data.error || `${path} ${res.status}`);
+  return data;
+}
+
+async function syncServerState(showStatus=false){
+  if(!SERVER_MODE) return null;
+  try {
+    const data = await serverRequest('/state');
+    if(data.state){
+      state = data.state;
+      localStorage.setItem('lanaaiMomentumClaude', JSON.stringify(state));
+      if(typeof state.initialEquity === 'number') CFG.initialEquity = state.initialEquity;
+      if(typeof state.riskPerTrade === 'number') CFG.riskPerTrade = state.riskPerTrade;
+      if(state.cfg?.riskPerTrade) CFG.riskPerTrade = state.cfg.riskPerTrade;
+      const riskEl = document.getElementById('riskPct');
+      const equityEl = document.getElementById('initialEquity');
+      if(riskEl) riskEl.value = (CFG.riskPerTrade * 100).toFixed(2).replace(/\.00$/, '');
+      if(equityEl) equityEl.value = state.initialEquity ?? CFG.initialEquity;
+      paintAll();
+    }
+    if(showStatus) setSyncStatus(`Worker refreshed · ${tw(nowMs())}`);
+    return state;
+  } catch(e) {
+    if(showStatus) setSyncStatus(`Worker refresh failed: ${e.message}`, true);
+    console.warn('syncServerState', e);
+    return null;
+  }
+}
+
+async function updateServerConfig(){
+  if(!SERVER_MODE) return;
+  try {
+    const payload = { initialEquity: CFG.initialEquity, riskPerTrade: CFG.riskPerTrade };
+    const data = await serverRequest('/config', { method:'POST', body: payload });
+    if(data.state){ state = data.state; paintAll(); }
+    setSyncStatus(`Worker config saved · ${tw(nowMs())}`);
+  } catch(e) {
+    setSyncStatus(`Worker config failed: ${e.message}`, true);
+  }
+}
 
 function saveState(){
   state.savedAt = nowMs();
@@ -547,6 +601,22 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
 }
 
 async function scanSignals(){
+  if(SERVER_MODE){
+    try {
+      log('Requesting Worker scan...');
+      const data = await serverRequest('/scan', { method:'POST' });
+      if(data.state){
+        state = data.state;
+        localStorage.setItem('lanaaiMomentumClaude', JSON.stringify(state));
+        paintAll();
+      }
+      setSyncStatus(`Worker scan complete · ${tw(nowMs())}`);
+      return state.signals || [];
+    } catch(e) {
+      log(`Worker scan failed: ${e.message}`);
+      throw e;
+    }
+  }
   try {
     const limit = Number(document.getElementById('scanLimit').value || 80);
     const minScore = Number(document.getElementById('minScore').value || 70);
@@ -690,15 +760,51 @@ async function runBacktest(){
   }
 }
 
-async function startPaper(){ state.running = true; saveState(); await paperTick(); }
-function stopPaper(){ state.running = false; saveState(); }
+async function startPaper(){
+  if(SERVER_MODE){
+    try {
+      const data = await serverRequest('/start', { method:'POST', body:{ initialEquity:CFG.initialEquity, riskPerTrade:CFG.riskPerTrade } });
+      if(data.state){ state = data.state; localStorage.setItem('lanaaiMomentumClaude', JSON.stringify(state)); paintAll(); }
+      setSyncStatus(`Worker paper started · ${tw(nowMs())}`);
+      return;
+    } catch(e) {
+      setSyncStatus(`Worker start failed: ${e.message}`, true);
+      throw e;
+    }
+  }
+  state.running = true; saveState(); await paperTick();
+}
+async function stopPaper(){
+  if(SERVER_MODE){
+    try {
+      const data = await serverRequest('/stop', { method:'POST' });
+      if(data.state){ state = data.state; localStorage.setItem('lanaaiMomentumClaude', JSON.stringify(state)); paintAll(); }
+      setSyncStatus(`Worker paper stopped · ${tw(nowMs())}`);
+      return;
+    } catch(e) {
+      setSyncStatus(`Worker stop failed: ${e.message}`, true);
+      throw e;
+    }
+  }
+  state.running = false; saveState();
+}
 function resetPaper(){
   if(!confirm('確定要重置 paper trading？所有未平倉與紀錄會清空。')) return;
+  if(SERVER_MODE){
+    serverRequest('/reset', { method:'POST', body:{ initialEquity:CFG.initialEquity, riskPerTrade:CFG.riskPerTrade } })
+      .then(data => {
+        if(data.state){ state = data.state; localStorage.setItem('lanaaiMomentumClaude', JSON.stringify(state)); paintAll(); }
+        setSyncStatus(`Worker paper reset · ${tw(nowMs())}`);
+      })
+      .catch(e => setSyncStatus(`Worker reset failed: ${e.message}`, true));
+    return;
+  }
   state.running = false; state.initialEquity = CFG.initialEquity; state.equity = CFG.initialEquity; state.peakEquity = CFG.initialEquity;
   state.pausedUntil = 0; state.consecutiveLosses = 0; state.positions = []; state.trades = []; state.equityCurve = [];
   saveState();
 }
 async function paperTick(){
+  if(SERVER_MODE){ await syncServerState(); return; }
   if(!state.running || paperTickRunning) return;
   paperTickRunning = true;
   try {
@@ -780,6 +886,7 @@ async function updatePositions(){
 }
 
 async function refreshSignalPrices(){
+  if(SERVER_MODE) return;
   if(!state.signals.length) return;
   try {
     const prices = await Promise.all(state.signals.map(s =>
@@ -794,6 +901,7 @@ async function refreshSignalPrices(){
 }
 
 async function refreshMarks(){
+  if(SERVER_MODE) return;
   if(!state.positions.length) return;
   try {
     const prices = await Promise.all(state.positions.map(p =>
@@ -1007,6 +1115,7 @@ function setupCapitalInputs(){
     state.riskPerTrade = v / 100;
     saveState();
     log(`Risk/trade 設為 ${v}%`);
+    updateServerConfig();
   });
   equityIn.addEventListener('change', () => {
     const v = Math.max(100, Number(equityIn.value) || 1000);
@@ -1019,6 +1128,7 @@ function setupCapitalInputs(){
     CFG.initialEquity = v;
     saveState();
     log(`Equity 基準設為 ${v} U（PnL 保留）`);
+    updateServerConfig();
   });
 }
 
@@ -1026,6 +1136,8 @@ paintAll();
 setupCapitalInputs();
 setupAutoScan();
 setupCloudSync();
+if(SERVER_MODE) syncServerState(true);
+setInterval(() => { if(SERVER_MODE) syncServerState(false); }, 15000);
 setInterval(() => { if(state.running) paperTick(); }, 60000);
 setInterval(refreshSignalPrices, 60000);
 setInterval(refreshMarks, 15000);
