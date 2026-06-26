@@ -4,11 +4,11 @@ const OKX_API = 'https://www.okx.com';
 const INTERVAL_MS = { '15m': 900000 };
 
 const LABELS = {
-  pullback_uptrend: 'Pullback uptrend',
-  strong_momentum_breakout: 'Strong momentum breakout',
-  volume_ignition: 'Volume ignition',
-  high_range_continuation: 'High range continuation',
-  narrative_momentum: 'Narrative momentum',
+  pullback_uptrend: '上升趨勢回檔',
+  strong_momentum_breakout: '強動量突破追價',
+  volume_ignition: '放量啟動追隨',
+  high_range_continuation: '高位續勢承接',
+  narrative_momentum: '題材動量順勢',
 };
 
 const DEFAULT_CFG = {
@@ -211,7 +211,7 @@ function normalizeState(state) {
   cfg.scanRequestDelayMs = Math.max(positiveInt(cfg.scanRequestDelayMs, DEFAULT_CFG.scanRequestDelayMs), DEFAULT_CFG.scanRequestDelayMs);
   if (typeof state.initialEquity === 'number') cfg.initialEquity = state.initialEquity;
   if (typeof state.riskPerTrade === 'number') cfg.riskPerTrade = state.riskPerTrade;
-  return {
+  const normalized = {
     ...defaultState(),
     ...state,
     cfg,
@@ -223,6 +223,18 @@ function normalizeState(state) {
     trades: Array.isArray(state.trades) ? state.trades : [],
     equityCurve: Array.isArray(state.equityCurve) ? state.equityCurve : [],
   };
+  normalizeStrategyLabels(normalized.signals);
+  normalizeStrategyLabels(normalized.positions);
+  normalizeStrategyLabels(normalized.trades);
+  return normalized;
+}
+
+function normalizeStrategyLabels(items) {
+  for (const item of items) {
+    if (item?.strategyKey && LABELS[item.strategyKey]) {
+      item.strategyLabel = LABELS[item.strategyKey];
+    }
+  }
 }
 
 function applyConfig(state, body = {}) {

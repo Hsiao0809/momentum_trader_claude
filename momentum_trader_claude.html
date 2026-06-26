@@ -941,6 +941,7 @@ function htmlEscape(v){ return String(v ?? '').replace(/[&<>"']/g, m => ({'&':'&
 function signedClass(v){ return !Number.isFinite(Number(v)) ? '' : Number(v) >= 0 ? 'pos' : 'neg'; }
 function showPct(v,d=2){ return Number.isFinite(Number(v)) ? `${fmt(v,d)}%` : '-'; }
 function metric(id, value, klass=''){ const el = document.getElementById(id); if(el){ el.textContent = value; el.className = `v ${klass}`.trim(); } }
+function strategyName(item){ return LABELS[item?.strategyKey] || item?.strategyLabel || item?.strategyKey || ''; }
 function symLink(sym){ return `<a class="sym-link" href="${tvHref(sym)}" target="_blank" rel="noopener noreferrer" title="Open ${htmlEscape(sym)} on TradingView"><strong>${htmlEscape(sym)}</strong></a>`; }
 function statsFromTrades(trades){
   let gp = 0, gl = 0, wins = 0, r = 0, pnl = 0;
@@ -1000,7 +1001,7 @@ function paintAll(){
     const delta = lastP ? pct(s.entry, lastP) : null;
     const lastPriceCell = lastP ? fmt(lastP,8) : '<span class="muted">—</span>';
     const deltaCell = delta !== null ? `<span class="${signedClass(delta)}">${showPct(delta)}</span>` : '<span class="muted">—</span>';
-    return `<tr><td class="sym">${symLink(s.symbol)}</td><td><span class="${scoreClass}">${fmt(s.score,0)}</span></td><td class="left">${htmlEscape(s.strategyLabel || s.strategyKey)}</td><td>${fmt(s.entry,8)}</td><td>${lastPriceCell}</td><td>${deltaCell}</td><td class="neg">${fmt(s.stop,8)}</td><td class="pos">${fmt(s.tp1,8)}</td><td>${showPct(s.trailPct)}</td><td class="${signedClass(m.momentum1h)}">${showPct(m.momentum1h)}</td><td class="${signedClass(m.momentum4h)}">${showPct(m.momentum4h)}</td><td class="${signedClass(m.momentum24h)}">${showPct(m.momentum24h)}</td><td>${showPct((m.position24h || 0) * 100)}</td><td>${fmt(m.volumeRatio,2)}x</td><td class="reason">${htmlEscape((s.reasons||[]).slice(0,4).join(' · '))}</td></tr>`;
+    return `<tr><td class="sym">${symLink(s.symbol)}</td><td><span class="${scoreClass}">${fmt(s.score,0)}</span></td><td class="left">${htmlEscape(strategyName(s))}</td><td>${fmt(s.entry,8)}</td><td>${lastPriceCell}</td><td>${deltaCell}</td><td class="neg">${fmt(s.stop,8)}</td><td class="pos">${fmt(s.tp1,8)}</td><td>${showPct(s.trailPct)}</td><td class="${signedClass(m.momentum1h)}">${showPct(m.momentum1h)}</td><td class="${signedClass(m.momentum4h)}">${showPct(m.momentum4h)}</td><td class="${signedClass(m.momentum24h)}">${showPct(m.momentum24h)}</td><td>${showPct((m.position24h || 0) * 100)}</td><td>${fmt(m.volumeRatio,2)}x</td><td class="reason">${htmlEscape((s.reasons||[]).slice(0,4).join(' · '))}</td></tr>`;
   }).join('') : '<tr><td class="sym muted" colspan="15">No signals</td></tr>';
 
   document.getElementById('backtestSummary').innerHTML = bt ? `Trades ${bt.summary.tradeCount} · Win ${fmt(bt.summary.winRatePct,2)}% · PF ${fmt(bt.summary.profitFactor,2)} · Return ${fmt(bt.summary.netReturnPct,2)}% · Max DD ${fmt(bt.summary.maxDrawdownPct,2)}% · ${tw(bt.runAt)}` : 'No run yet';
@@ -1029,14 +1030,14 @@ function paintAll(){
       ? `<span class="pos">✓ ${fmt(p.tp1,8)}</span>`
       : `<span class="muted">${fmt(p.tp1,8)}</span>`;
     const sideCell = (p.side||'long')==='long' ? `<span class="pos" style="font-weight:600">多</span>` : `<span class="neg" style="font-weight:600">空</span>`;
-    return `<tr><td class="sym">${symLink(p.symbol)}</td><td class="left">${htmlEscape(p.strategyLabel || p.strategyKey)}</td><td>${sideCell}</td><td>${fmt(p.entry,8)}</td><td>${lastCell}</td><td>${pctCell}</td><td>${pnlCell}</td><td>${stopCell}</td><td>${tp1Cell}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.remainingQty,4)}</td><td>${fmt(p.riskUsdt,2)}</td><td>${fmt(p.score,0)}</td><td>${tw(p.entryTime)}</td><td class="reason">${htmlEscape((p.reasons||[]).slice(0,3).join(' · '))}</td></tr>`;
+    return `<tr><td class="sym">${symLink(p.symbol)}</td><td class="left">${htmlEscape(strategyName(p))}</td><td>${sideCell}</td><td>${fmt(p.entry,8)}</td><td>${lastCell}</td><td>${pctCell}</td><td>${pnlCell}</td><td>${stopCell}</td><td>${tp1Cell}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.remainingQty,4)}</td><td>${fmt(p.riskUsdt,2)}</td><td>${fmt(p.score,0)}</td><td>${tw(p.entryTime)}</td><td class="reason">${htmlEscape((p.reasons||[]).slice(0,3).join(' · '))}</td></tr>`;
   }).join('') : '<tr><td class="sym muted" colspan="15">No open position</td></tr>';
 
   document.getElementById('tradeSummary').textContent = `${state.trades.length} closed paper trades`;
   document.getElementById('tradesBody').innerHTML = state.trades.length ? state.trades.slice(0,100).map(t => {
     const holdH = (t.exitTime && t.entryTime) ? fmt((t.exitTime - t.entryTime) / 3600000, 1) : '—';
     const sideLabel = (t.side || 'long') === 'short' ? '<span class="neg" style="font-weight:600">空</span>' : '<span class="pos" style="font-weight:600">多</span>';
-    return `<tr><td class="sym">${symLink(t.symbol)}</td><td class="left">${htmlEscape(t.strategyLabel || t.strategyKey)}</td><td>${sideLabel}</td><td>${fmt(t.entry,8)}</td><td>${fmt(t.exit,8)}</td><td class="${signedClass(t.rMultiple)}">${fmt(t.rMultiple,2)}</td><td class="${signedClass(t.pnl)}">${fmt(t.pnl,2)}</td><td class="pos">${showPct(t.mfePct)}</td><td class="neg">${showPct(t.maePct)}</td><td>${fmt(t.score,0)}</td><td>${holdH}h</td><td>${tw(t.entryTime)}</td><td>${tw(t.exitTime)}</td><td class="left">${htmlEscape(t.reason)}</td></tr>`;
+    return `<tr><td class="sym">${symLink(t.symbol)}</td><td class="left">${htmlEscape(strategyName(t))}</td><td>${sideLabel}</td><td>${fmt(t.entry,8)}</td><td>${fmt(t.exit,8)}</td><td class="${signedClass(t.rMultiple)}">${fmt(t.rMultiple,2)}</td><td class="${signedClass(t.pnl)}">${fmt(t.pnl,2)}</td><td class="pos">${showPct(t.mfePct)}</td><td class="neg">${showPct(t.maePct)}</td><td>${fmt(t.score,0)}</td><td>${holdH}h</td><td>${tw(t.entryTime)}</td><td>${tw(t.exitTime)}</td><td class="left">${htmlEscape(t.reason)}</td></tr>`;
   }).join('') : '<tr><td class="sym muted" colspan="14">No closed paper trade</td></tr>';
   paintReview();
 
@@ -1067,7 +1068,7 @@ function paintReview(){
   const rowHtml = rows => rows.map(r =>
     `<tr><td class="left">${htmlEscape(r.key)}</td><td>${r.count}</td><td class="${r.winPct>=50?'pos':'neg'}">${showPct(r.winPct)}</td><td class="${signedClass(r.avgR)}">${fmt(r.avgR,2)}R</td><td class="${signedClass(r.totalPnl)}">${fmt(r.totalPnl,2)}</td></tr>`
   ).join('');
-  document.getElementById('reviewStrategyBody').innerHTML = rowHtml(buildBreakdown(trades, t => t.strategyLabel || t.strategyKey || '—'));
+  document.getElementById('reviewStrategyBody').innerHTML = rowHtml(buildBreakdown(trades, t => strategyName(t) || '—'));
   document.getElementById('reviewReasonBody').innerHTML = rowHtml(buildBreakdown(trades, t => REASON_LABELS[t.reason] || t.reason || '—'));
   const wins = trades.filter(t => Number(t.pnl||0) >= 0).length;
   const avgHold = trades.reduce((a,t) => a + ((t.exitTime&&t.entryTime) ? (t.exitTime-t.entryTime)/3600000 : 0), 0) / trades.length;
