@@ -46,7 +46,7 @@ export default {
     return handleRequest(request, env, ctx);
   },
   async scheduled(controller, env, ctx) {
-    ctx.waitUntil(runPaperTick(env, { reason: 'cron' }));
+    ctx.waitUntil(runPaperTick(env, { reason: 'cron', scheduledScan: true }));
   },
 };
 
@@ -147,8 +147,8 @@ async function runPaperTick(env, options = {}) {
       return;
     }
 
-    const scanStale = !state.signals.length || now - (state.lastScanAt || 0) > state.cfg.scanStaleMs;
-    const willScan = options.forceScan || scanStale;
+    const scanStale = !state.signals.length || now - (state.lastScanAt || 0) >= state.cfg.scanStaleMs;
+    const willScan = options.forceScan || options.scheduledScan || scanStale;
     await updatePositions(state, { markToMarket: !willScan });
 
     if (willScan) {

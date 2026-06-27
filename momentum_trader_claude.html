@@ -97,7 +97,7 @@
     <label>Backtest days <select id="days"><option>7</option><option selected>30</option><option>90</option></select></label>
     <label>Min score <input id="minScore" type="number" value="70" min="60" max="95"></label>
     <label>Backtest universe <input id="universe" type="number" value="30" min="3" max="80"></label>
-    <label>Auto-scan <input id="autoScan" type="checkbox"> every <input id="autoScanMin" type="number" value="5" min="1" max="60" style="width:54px">m</label>
+    <label id="autoScanControl">Auto-scan <input id="autoScan" type="checkbox"> every <input id="autoScanMin" type="number" value="5" min="1" max="60" style="width:54px">m</label>
     <label>Paper gate <input type="number" value="82" disabled style="width:54px"></label>
   </div>
   <div class="controls" style="margin-top:8px">
@@ -1088,8 +1088,14 @@ function downloadBacktest(){ downloadCsv('backtest_trades.csv', state.backtest ?
 function downloadPaper(){ downloadCsv('paper_trades.csv', state.trades); }
 
 function setupAutoScan(){
+  const control = document.getElementById('autoScanControl');
   const cb = document.getElementById('autoScan');
   const minIn = document.getElementById('autoScanMin');
+  if(SERVER_MODE){
+    cb.checked = false;
+    control.hidden = true;
+    return;
+  }
   const apply = () => {
     if(autoScanTimer){ clearInterval(autoScanTimer); autoScanTimer = null; }
     if(cb.checked){
