@@ -217,6 +217,13 @@ const LABELS = {
   high_range_continuation: '高位續勢承接',
   narrative_momentum: '題材動量順勢'
 };
+const STRATEGY_SIDES = {
+  pullback_uptrend: 'long',
+  strong_momentum_breakout: 'short',
+  volume_ignition: 'short',
+  high_range_continuation: 'short',
+  narrative_momentum: 'long'
+};
 const CFG = {
   initialEquity: 1000,
   riskPerTrade: 0.01,
@@ -589,6 +596,7 @@ function strategyKey(m){
   if(m.volumeRatio >= 2 && m.position24h >= 0.65 && m.momentum1h > -1) return 'volume_ignition';
   return 'narrative_momentum';
 }
+function sideForStrategy(key){ return STRATEGY_SIDES[key] || 'short'; }
 function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=false, minScore=CFG.minSignalScore){
   const c = closedKlines(rows);
   if(c.length < 110 || quoteVolume < CFG.minQuoteVolume) return null;
@@ -618,7 +626,8 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
   if(emaSlope < 0) return null;
 
   const isPullback = momentum24h >= 5 && momentum4h >= -1 && momentum1h <= 0.5 && momentum1h >= -3 && position24h >= 0.40 && position24h <= 0.85;
-  const side = isPullback ? 'long' : 'short';
+  const key = strategyKey({ momentum1h, momentum4h, momentum24h, position24h, distancePrevHigh, volumeRatio, isPullback });
+  const side = sideForStrategy(key);
 
   const risk = buildRisk(price, atrValue, side);
   let score = 10;
@@ -641,7 +650,6 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
   score = Math.round(clamp(score, 0, 100));
   if(score < minScore) return null;
   const metrics = { momentum1h, momentum4h, momentum24h, position24h, distancePrevHigh, volumeRatio, atrPct:atrValue, stopPct:risk.stopPct, btcRiskOff:riskOff, lastKlineOpenTime:kTime(c[c.length-1]), aboveEma, emaSlope, isPullback };
-  const key = strategyKey(metrics);
   return { scannedAt, symbol, score, strategyKey:key, strategyLabel:LABELS[key], side, entry:price, stop:risk.stop, tp1:risk.tp1, beTrigger:risk.beTrigger, lockTrigger:risk.lockTrigger, lockLevel:risk.lockLevel, trailPct:risk.trailPct, atrPct:atrValue, quoteVolume, reasons, metrics };
 }
 
@@ -703,7 +711,7 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
   const entryBar = rows[entryIndex];
   const entry = kOpen(entryBar);
   const atrValue = atrPct(rows.slice(Math.max(0, entryIndex - 100), entryIndex));
-  const side = strategyKey === 'pullback_uptrend' ? 'long' : 'short';
+  const side = sideForStrategy(strategyKey);
   const risk = buildRisk(entry, atrValue, side);
   const originalStop = risk.stop;
   const sized = positionSize(equity, entry, risk.stop);

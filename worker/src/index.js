@@ -11,6 +11,14 @@ const LABELS = {
   narrative_momentum: '題材動量順勢',
 };
 
+const STRATEGY_SIDES = {
+  pullback_uptrend: 'long',
+  strong_momentum_breakout: 'short',
+  volume_ignition: 'short',
+  high_range_continuation: 'short',
+  narrative_momentum: 'long',
+};
+
 const DEFAULT_CFG = {
   initialEquity: 1000,
   riskPerTrade: 0.01,
@@ -567,7 +575,8 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
   if (emaSlope < 0) return null;
 
   const isPullback = momentum24h >= 5 && momentum4h >= -1 && momentum1h <= 0.5 && momentum1h >= -3 && position24h >= 0.40 && position24h <= 0.85;
-  const side = isPullback ? 'long' : 'short';
+  const key = strategyKey({ momentum1h, momentum4h, momentum24h, position24h, distancePrevHigh, volumeRatio, isPullback });
+  const side = sideForStrategy(key);
   const risk = buildRisk(price, atrValue, side);
   let score = 10;
   const reasons = [`24h quote volume ${Math.round(quoteVolume).toLocaleString()} USDT`];
@@ -591,7 +600,6 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
   if (score < cfg.minSignalScore) return null;
 
   const metrics = { momentum1h, momentum4h, momentum24h, position24h, distancePrevHigh, volumeRatio, atrPct: atrValue, stopPct: risk.stopPct, btcRiskOff: riskOff, lastKlineOpenTime: kTime(c[c.length - 1]), aboveEma, emaSlope, isPullback };
-  const key = strategyKey(metrics);
   return { scannedAt, symbol, instId, score, strategyKey: key, strategyLabel: LABELS[key], side, entry: price, lastPrice: price, stop: risk.stop, tp1: risk.tp1, beTrigger: risk.beTrigger, lockTrigger: risk.lockTrigger, lockLevel: risk.lockLevel, trailPct: risk.trailPct, atrPct: atrValue, quoteVolume, reasons, metrics };
 }
 
@@ -804,6 +812,10 @@ function strategyKey(m) {
   if (m.momentum24h >= 8 && m.position24h >= 0.75 && m.position24h < 0.92 && m.momentum4h >= -3 && m.momentum4h <= 8) return 'high_range_continuation';
   if (m.volumeRatio >= 2 && m.position24h >= 0.65 && m.momentum1h > -1) return 'volume_ignition';
   return 'narrative_momentum';
+}
+
+function sideForStrategy(key) {
+  return STRATEGY_SIDES[key] || 'short';
 }
 
 function symbolFromInstId(instId) {
