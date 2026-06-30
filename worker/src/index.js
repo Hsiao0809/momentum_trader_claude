@@ -1,5 +1,7 @@
 const STATE_KEY = 'paper-state-v1';
 const LOCK_KEY = 'paper-lock-v1';
+const NOTIFICATION_STATUS_KEY = 'notification-status-v1';
+const NOTIFICATION_DLQ = 'momentum-trader-notifications-dlq';
 const OKX_API = 'https://www.okx.com';
 const INTERVAL_MS = { '15m': 900000 };
 
@@ -56,6 +58,13 @@ export default {
   async scheduled(controller, env, ctx) {
     ctx.waitUntil(runPaperTick(env, { reason: 'cron', scheduledScan: true }));
   },
+  async queue(batch, env) {
+    if (batch.queue === NOTIFICATION_DLQ) {
+      await handleNotificationDeadLetters(batch, env);
+      return;
+    }
+    await handleNotificationQueue(batch, env);
+  },
 };
 
 async function handleRequest(request, env) {
@@ -70,7 +79,7 @@ async function handleRequest(request, env) {
     }
 
     if (request.method === 'GET' && url.pathname === '/state') {
-      return json({ ok: true, state: await loadState(env) });
+      return json({ ok: true, state: await loadStateForResponse(env) });
     }
 
     if (request.method === 'GET' && url.pathname === '/prices') {
@@ -80,7 +89,7 @@ async function handleRequest(request, env) {
     }
 
     if (request.method === 'GET' && url.pathname === '/snapshot') {
-      const state = await loadState(env);
+      const state = await loadStateForResponse(env);
       const prices = await currentPrices(state);
       return json({ ok: true, fetchedAt: Date.now(), state, prices });
     }
@@ -135,7 +144,19 @@ async function handleRequest(request, env) {
 
     if (request.method === 'POST' && url.pathname === '/notify/test') {
       const state = await loadState(env);
-      const notification = await sendNotification(env, 'Claude Momentum 測試通知\nWorker 通知通道已連線。', { type: 'test', state });
+      const text = 'Claude Momentum 測試通知\nWorker 通知通道已連線。';
+      if (url.searchParams.get('queue') === '1' && env.NOTIFICATION_QUEUE) {
+        await env.NOTIFICATION_QUEUE.send({
+          id: `notification_test_${Date.now()}`,
+          type: 'test',
+          symbol: 'TEST',
+          createdAt: Date.now(),
+          text,
+          payload: { type: 'test' },
+        });
+        return json({ ok: true, notification: { configured: configuredNotificationChannels(env), sent: 0, queued: true } });
+      }
+      const notification = await sendNotification(env, text, { type: 'test', state });
       return json({ ok: true, notification });
     }
 
@@ -202,6 +223,25 @@ async function runPaperTick(env, options = {}) {
 async function loadState(env) {
   const raw = await env.PAPER_STATE.get(STATE_KEY, 'json');
   return normalizeState(raw || defaultState());
+}
+
+async function loadStateForResponse(env) {
+  const [state, status] = await Promise.all([
+    loadState(env),
+    env.PAPER_STATE.get(NOTIFICATION_STATUS_KEY, 'json'),
+  ]);
+  const current = state.lastNotification;
+  if (status && (
+    status.positionId === current?.positionId ||
+    Number(status.createdAt || 0) >= Number(current?.createdAt || 0)
+  )) {
+    state.lastNotification = status;
+    state.notificationLog = [
+      status,
+      ...(state.notificationLog || []).filter((item) => item.positionId !== status.positionId),
+    ].slice(0, 100);
+  }
+  return state;
 }
 
 async function saveState(env, state) {
@@ -648,13 +688,36 @@ function takeTP1(state, p) {
 
 async function notifyNewPosition(env, position, state) {
   const message = positionNotificationText(position);
-  const result = await sendNotification(env, message, { type: 'new_position', position, equity: state.equity });
+  const createdAt = Date.now();
+  const payload = { type: 'new_position', position, equity: state.equity };
+  const queueMessage = {
+    id: `notification_${position.id}`,
+    type: 'new_position',
+    symbol: position.symbol,
+    positionId: position.id,
+    createdAt,
+    text: message,
+    payload,
+  };
+  let result;
+  const configured = configuredNotificationChannels(env);
+  if (env.NOTIFICATION_QUEUE && configured > 0) {
+    try {
+      await env.NOTIFICATION_QUEUE.send(queueMessage);
+      result = { configured, sent: 0, queued: true, attempts: [], failures: [] };
+    } catch (error) {
+      result = await sendNotification(env, message, payload);
+      result.queueError = String(error);
+    }
+  } else {
+    result = await sendNotification(env, message, payload);
+  }
   const record = {
     type: 'new_position',
     symbol: position.symbol,
     positionId: position.id,
-    createdAt: Date.now(),
-    pending: result.configured > 0 && result.sent === 0,
+    createdAt,
+    pending: result.configured > 0 && result.sent === 0 && !result.queued,
     ...result,
   };
   storeNotificationRecord(state, record);
@@ -697,7 +760,7 @@ function queuePositionNotification(state, position, text, createdAt) {
 
 function recoverLastFailedNotification(state) {
   const last = state.lastNotification;
-  if (!last || last.type !== 'new_position' || last.sent !== 0 || Number(last.deliveryCycles || 0) >= 12) return;
+  if (!last || last.type !== 'new_position' || last.sent !== 0 || last.queued || Number(last.deliveryCycles || 0) >= 12) return;
   if ((state.pendingNotifications || []).some((item) => item.positionId === last.positionId)) return;
   const position = (state.positions || []).find((item) => item.id === last.positionId);
   if (position) queuePositionNotification(state, position, positionNotificationText(position), last.createdAt || Date.now());
@@ -734,6 +797,64 @@ async function flushPendingNotifications(state, env) {
   }
   state.pendingNotifications = [...remaining, ...pending.slice(2)].slice(0, 20);
   return true;
+}
+
+async function handleNotificationQueue(batch, env) {
+  for (const message of batch.messages) {
+    const item = message.body || {};
+    const result = await sendNotification(env, item.text || '', item.payload || {});
+    const delivered = result.sent > 0 || result.configured === 0;
+    const record = {
+      type: item.type || 'new_position',
+      symbol: item.symbol,
+      positionId: item.positionId,
+      createdAt: item.createdAt || Date.now(),
+      updatedAt: Date.now(),
+      queueAttempts: message.attempts,
+      queued: !delivered,
+      pending: false,
+      ...result,
+    };
+    if (item.type === 'new_position') await saveNotificationStatus(env, record);
+    if (delivered) {
+      message.ack();
+    } else {
+      message.retry({ delaySeconds: 60 });
+    }
+  }
+}
+
+async function handleNotificationDeadLetters(batch, env) {
+  for (const message of batch.messages) {
+    const item = message.body || {};
+    if (item.type === 'new_position') {
+      await saveNotificationStatus(env, {
+        type: item.type,
+        symbol: item.symbol,
+        positionId: item.positionId,
+        createdAt: item.createdAt || Date.now(),
+        updatedAt: Date.now(),
+        queueAttempts: message.attempts,
+        configured: configuredNotificationChannels(env),
+        sent: 0,
+        queued: false,
+        pending: true,
+        attempts: [],
+        failures: [{ channel: 'queue', error: 'Queue retries exhausted; message moved to the dead-letter queue.' }],
+      });
+    }
+    message.ack();
+  }
+}
+
+async function saveNotificationStatus(env, record) {
+  await env.PAPER_STATE.put(NOTIFICATION_STATUS_KEY, JSON.stringify(record));
+}
+
+function configuredNotificationChannels(env) {
+  return Number(Boolean(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID)) +
+    Number(Boolean(env.DISCORD_WEBHOOK_URL)) +
+    Number(Boolean(env.NOTIFY_WEBHOOK_URL));
 }
 
 async function sendNotification(env, text, payload = {}) {

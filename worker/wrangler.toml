@@ -9,3 +9,20 @@ crons = ["*/5 * * * *"]
 [[kv_namespaces]]
 binding = "PAPER_STATE"
 id = "320b0704920745398c1c73d072beb5c3"
+
+[[queues.producers]]
+binding = "NOTIFICATION_QUEUE"
+queue = "momentum-trader-notifications"
+
+[[queues.consumers]]
+queue = "momentum-trader-notifications"
+max_batch_size = 1
+max_batch_timeout = 1
+max_retries = 5
+retry_delay = 60
+dead_letter_queue = "momentum-trader-notifications-dlq"
+
+[[queues.consumers]]
+queue = "momentum-trader-notifications-dlq"
+max_batch_size = 1
+max_batch_timeout = 1

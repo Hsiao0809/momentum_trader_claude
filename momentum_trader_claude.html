@@ -1195,10 +1195,21 @@ function paintAll(){
   const notifyStatus = document.getElementById('notifyStatus');
   const lastNotification = state.lastNotification;
   if(notifyStatus){
+    const deliveryStatus = lastNotification?.queued
+      ? '排隊中'
+      : lastNotification?.sent > 0
+        ? '成功'
+        : lastNotification?.pending
+          ? '待補送'
+          : '失敗';
     notifyStatus.textContent = lastNotification
-      ? `最近通知：${lastNotification.sent > 0 ? '成功' : '失敗'} · ${lastNotification.symbol || '-'} · ${tw(lastNotification.createdAt)}`
+      ? `最近通知：${deliveryStatus} · ${lastNotification.symbol || '-'} · ${tw(lastNotification.createdAt)}`
       : '最近通知：尚無紀錄';
-    notifyStatus.style.color = lastNotification && lastNotification.sent === 0 ? 'var(--red)' : '';
+    notifyStatus.style.color = lastNotification?.queued
+      ? 'var(--accent)'
+      : lastNotification && lastNotification.sent === 0
+        ? 'var(--red)'
+        : '';
   }
   document.getElementById('signalsBody').innerHTML = state.signals.length ? state.signals.map(s => {
     const m = s.metrics || {};

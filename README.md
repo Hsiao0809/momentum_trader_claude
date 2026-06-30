@@ -28,7 +28,7 @@ Binance Futures works from the browser, but Binance blocks Cloudflare Workers/Pa
 
 New paper positions are notified from the Cloudflare Worker, so notifications still work when the dashboard tab is closed. Configure at least one notification channel as a Worker secret:
 
-Delivery retries transient failures up to three times. The latest result and up to 100 notification records are saved in the existing paper state without additional KV writes.
+New-position notifications are published to Cloudflare Queue `momentum-trader-notifications` and delivered by a separate consumer invocation, avoiding the market scan's external subrequest limit. The consumer retries failures and moves exhausted messages to `momentum-trader-notifications-dlq`. The existing KV pending-delivery path remains as a fallback when publishing to Queue fails.
 
 ### Telegram
 
