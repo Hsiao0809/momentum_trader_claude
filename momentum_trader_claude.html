@@ -82,6 +82,7 @@
   <h1>Claude Momentum Dashboard <span class="subtitle">Binance USD&Ⓜ; · Taiwan time</span> <a href="https://github.com/Hsiao0809/momentum_trader_claude" target="_blank" rel="noopener" style="font-size:.75rem;font-weight:600;color:var(--accent);text-decoration:none;margin-left:10px;vertical-align:middle;border:1px solid rgba(217,119,87,.4);border-radius:5px;padding:2px 8px;letter-spacing:.02em">GitHub ↗</a></h1>
   <div class="controls">
     <button onclick="scanSignals()">Scan Signals</button>
+    <button id="refreshCurrentData" class="ghost" onclick="syncNow()" title="只讀取目前 Worker 狀態，不執行新掃描">更新當前數據</button>
     <button class="ghost" onclick="runBacktest()">Run Backtest</button>
     <button class="ghost" onclick="startPaper()">Start Paper</button>
     <button class="ghost" onclick="stopPaper()">Stop Paper</button>
@@ -110,7 +111,6 @@
   </div>
   <div class="controls" style="margin-top:8px">
     <label>Worker <input id="workerUrl" type="text" value="momentum-trader-claude-runner" disabled style="width:260px"></label>
-    <button class="ghost" onclick="syncNow()">Refresh Worker</button>
     <span id="syncStatus" class="status" style="min-width:200px"></span>
     <span id="notifyStatus" class="status" style="min-width:220px"></span>
   </div>
@@ -363,7 +363,15 @@ function debouncedCloudSave(){
   cloudSaveTimer = setTimeout(pushToCloud, 30000);
 }
 
-function syncNow(){ return syncServerState(true); }
+async function syncNow(){
+  const button = document.getElementById('refreshCurrentData');
+  if(button) button.disabled = true;
+  try {
+    return await syncServerState(true);
+  } finally {
+    if(button) button.disabled = false;
+  }
+}
 
 function setupCloudSync(){
   const tokenEl = document.getElementById('ghToken');
@@ -411,7 +419,7 @@ async function syncServerState(showStatus=false){
       if(equityEl) equityEl.value = state.initialEquity ?? CFG.initialEquity;
       paintAll();
     }
-    if(showStatus) setSyncStatus(`Worker refreshed · ${tw(nowMs())}`);
+    if(showStatus) setSyncStatus(`數據已更新 · ${tw(nowMs())}`);
     return state;
   } catch(e) {
     if(showStatus) setSyncStatus(`Worker refresh failed: ${e.message}`, true);
