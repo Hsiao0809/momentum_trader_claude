@@ -28,6 +28,7 @@
     button{border:0;border-radius:6px;background:var(--accent);color:#1F1E1D;font-weight:600;padding:6px 12px;cursor:pointer;font-size:12px;height:28px;line-height:1;font-family:inherit;transition:filter .12s,transform .05s}
     button:hover{filter:brightness(1.08)}
     button:active{transform:translateY(1px)}
+    button.icon-btn{width:28px;min-width:28px;padding:0;display:inline-grid;place-items:center;font-size:17px;font-weight:400}
     button.ghost{background:transparent;color:var(--text);border:1px solid var(--border)}
     button.ghost:hover{background:var(--panel2);border-color:var(--accent);color:var(--accent)}
     button.danger{background:transparent;color:var(--red);border:1px solid rgba(217,117,106,.4)}
@@ -82,7 +83,7 @@
   <h1>Claude Momentum Dashboard <span class="subtitle">Binance USD&Ⓜ; · Taiwan time</span> <a href="https://github.com/Hsiao0809/momentum_trader_claude" target="_blank" rel="noopener" style="font-size:.75rem;font-weight:600;color:var(--accent);text-decoration:none;margin-left:10px;vertical-align:middle;border:1px solid rgba(217,119,87,.4);border-radius:5px;padding:2px 8px;letter-spacing:.02em">GitHub ↗</a></h1>
   <div class="controls">
     <button onclick="scanSignals()">Scan Signals</button>
-    <button id="refreshCurrentData" class="ghost" onclick="syncNow()" title="更新 Worker 狀態與最新市場價格，不執行新掃描">更新當前數據</button>
+    <button id="refreshCurrentData" class="ghost icon-btn" onclick="syncNow()" aria-label="更新當前數據" title="更新 Worker 狀態與最新市場價格，不執行新掃描">↻</button>
     <button class="ghost" onclick="runBacktest()">Run Backtest</button>
     <button class="ghost" onclick="startPaper()">Start Paper</button>
     <button class="ghost" onclick="stopPaper()">Stop Paper</button>
