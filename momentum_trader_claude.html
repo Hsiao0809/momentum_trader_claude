@@ -112,6 +112,7 @@
     <label>Worker <input id="workerUrl" type="text" value="momentum-trader-claude-runner" disabled style="width:260px"></label>
     <button class="ghost" onclick="syncNow()">Refresh Worker</button>
     <span id="syncStatus" class="status" style="min-width:200px"></span>
+    <span id="notifyStatus" class="status" style="min-width:220px"></span>
   </div>
 </header>
 
@@ -994,6 +995,14 @@ function paintAll(){
 
   const signalSummary = document.getElementById('signalSummary');
   if(signalSummary) signalSummary.textContent = `${state.signals.length} candidates · last scan ${state.lastScanAt ? tw(state.lastScanAt) : 'never'}`;
+  const notifyStatus = document.getElementById('notifyStatus');
+  const lastNotification = state.lastNotification;
+  if(notifyStatus){
+    notifyStatus.textContent = lastNotification
+      ? `最近通知：${lastNotification.sent > 0 ? '成功' : '失敗'} · ${lastNotification.symbol || '-'} · ${tw(lastNotification.createdAt)}`
+      : '最近通知：尚無紀錄';
+    notifyStatus.style.color = lastNotification && lastNotification.sent === 0 ? 'var(--red)' : '';
+  }
   document.getElementById('signalsBody').innerHTML = state.signals.length ? state.signals.map(s => {
     const m = s.metrics || {};
     const scoreClass = s.score >= 85 ? 'pill high' : 'pill live';

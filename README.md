@@ -28,6 +28,8 @@ Binance Futures works from the browser, but Binance blocks Cloudflare Workers/Pa
 
 New paper positions are notified from the Cloudflare Worker, so notifications still work when the dashboard tab is closed. Configure at least one notification channel as a Worker secret:
 
+Delivery retries transient failures up to three times. The latest result and up to 100 notification records are saved in the existing paper state without additional KV writes.
+
 ### Telegram
 
 Create a Telegram bot with BotFather, send one message to the bot, then set:

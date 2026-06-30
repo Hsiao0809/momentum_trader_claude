@@ -196,6 +196,7 @@ function defaultState() {
     positions: [],
     trades: [],
     equityCurve: [],
+    notificationLog: [],
     backtest: null,
     lastScanAt: 0,
     lastCoreScanAt: 0,
@@ -228,6 +229,7 @@ function normalizeState(state) {
     positions: Array.isArray(state.positions) ? state.positions : [],
     trades: Array.isArray(state.trades) ? state.trades : [],
     equityCurve: Array.isArray(state.equityCurve) ? state.equityCurve : [],
+    notificationLog: Array.isArray(state.notificationLog) ? state.notificationLog.slice(0, 100) : [],
   };
   normalizeStrategyLabels(normalized.signals);
   normalizeStrategyLabels(normalized.positions);
@@ -612,7 +614,17 @@ async function notifyNewPosition(env, position, state) {
     `時間：${new Date(position.entryTime).toISOString()}`,
   ].filter(Boolean).join('\n');
 
-  await sendNotification(env, message, { type: 'new_position', position, equity: state.equity });
+  const result = await sendNotification(env, message, { type: 'new_position', position, equity: state.equity });
+  const record = {
+    type: 'new_position',
+    symbol: position.symbol,
+    positionId: position.id,
+    createdAt: Date.now(),
+    ...result,
+  };
+  state.lastNotification = record;
+  state.notificationLog = [record, ...(state.notificationLog || [])].slice(0, 100);
+  return result;
 }
 
 async function sendNotification(env, text, payload = {}) {
@@ -621,7 +633,7 @@ async function sendNotification(env, text, payload = {}) {
   if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
     tasks.push({
       channel: 'telegram',
-      request: fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      send: () => fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -636,7 +648,7 @@ async function sendNotification(env, text, payload = {}) {
   if (env.DISCORD_WEBHOOK_URL) {
     tasks.push({
       channel: 'discord',
-      request: fetch(env.DISCORD_WEBHOOK_URL, {
+      send: () => fetch(env.DISCORD_WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: text }),
@@ -647,7 +659,7 @@ async function sendNotification(env, text, payload = {}) {
   if (env.NOTIFY_WEBHOOK_URL) {
     tasks.push({
       channel: 'webhook',
-      request: fetch(env.NOTIFY_WEBHOOK_URL, {
+      send: () => fetch(env.NOTIFY_WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, ...payload }),
@@ -657,20 +669,37 @@ async function sendNotification(env, text, payload = {}) {
 
   if (!tasks.length) return { configured: 0, sent: 0, failures: [] };
 
-  const results = await Promise.allSettled(tasks.map((task) => task.request));
-  const failures = [];
-  for (const [index, result] of results.entries()) {
-    const channel = tasks[index].channel;
-    if (result.status === 'rejected') {
-      failures.push({ channel, error: String(result.reason) });
-      console.warn('notification failed', channel, result.reason);
-    } else if (!result.value.ok) {
-      const body = await result.value.text().catch(() => '');
-      failures.push({ channel, status: result.value.status, body: body.slice(0, 500) });
-      console.warn('notification failed', channel, result.value.status, body);
+  const results = await Promise.all(tasks.map(sendNotificationWithRetry));
+  const failures = results.filter((result) => !result.ok);
+  return {
+    configured: tasks.length,
+    sent: tasks.length - failures.length,
+    attempts: results.map(({ channel, attempts }) => ({ channel, attempts })),
+    failures: failures.map(({ channel, attempts, status, error, body }) => ({ channel, attempts, status, error, body })),
+  };
+}
+
+async function sendNotificationWithRetry(task) {
+  const maxAttempts = 3;
+  let lastFailure = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const response = await task.send();
+      if (response.ok) return { ok: true, channel: task.channel, attempts: attempt };
+
+      const body = (await response.text().catch(() => '')).slice(0, 500);
+      lastFailure = { ok: false, channel: task.channel, attempts: attempt, status: response.status, body };
+      if (response.status < 500 && response.status !== 429) break;
+    } catch (error) {
+      lastFailure = { ok: false, channel: task.channel, attempts: attempt, error: String(error) };
     }
+
+    if (attempt < maxAttempts) await sleep(500 * (2 ** (attempt - 1)));
   }
-  return { configured: tasks.length, sent: tasks.length - failures.length, failures };
+
+  console.warn('notification failed', task.channel, lastFailure);
+  return lastFailure;
 }
 
 function buildRisk(entry, atrValue, side = 'long') {
