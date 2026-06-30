@@ -82,7 +82,7 @@
   <h1>Claude Momentum Dashboard <span class="subtitle">Binance USD&Ⓜ; · Taiwan time</span> <a href="https://github.com/Hsiao0809/momentum_trader_claude" target="_blank" rel="noopener" style="font-size:.75rem;font-weight:600;color:var(--accent);text-decoration:none;margin-left:10px;vertical-align:middle;border:1px solid rgba(217,119,87,.4);border-radius:5px;padding:2px 8px;letter-spacing:.02em">GitHub ↗</a></h1>
   <div class="controls">
     <button onclick="scanSignals()">Scan Signals</button>
-    <button id="refreshCurrentData" class="ghost" onclick="syncNow()" title="只讀取目前 Worker 狀態，不執行新掃描">更新當前數據</button>
+    <button id="refreshCurrentData" class="ghost" onclick="syncNow()" title="更新 Worker 狀態與最新市場價格，不執行新掃描">更新當前數據</button>
     <button class="ghost" onclick="runBacktest()">Run Backtest</button>
     <button class="ghost" onclick="startPaper()">Start Paper</button>
     <button class="ghost" onclick="stopPaper()">Stop Paper</button>
@@ -112,6 +112,7 @@
   <div class="controls" style="margin-top:8px">
     <label>Worker <input id="workerUrl" type="text" value="momentum-trader-claude-runner" disabled style="width:260px"></label>
     <span id="syncStatus" class="status" style="min-width:200px"></span>
+    <span id="priceStatus" class="status" style="min-width:190px"></span>
     <span id="notifyStatus" class="status" style="min-width:220px"></span>
   </div>
 </header>
@@ -228,6 +229,8 @@ const CFG = {
   symbolStopCooldownMs: 24 * 60 * 60 * 1000
 };
 let state = loadState();
+let latestPrices = {};
+let latestPriceAt = 0;
 let autoScanTimer = null;
 let paperTickRunning = false;
 
@@ -367,7 +370,14 @@ async function syncNow(){
   const button = document.getElementById('refreshCurrentData');
   if(button) button.disabled = true;
   try {
-    return await syncServerState(true);
+    const current = await syncServerState(false);
+    if(!current) throw new Error('Worker state unavailable');
+    await refreshServerPrices();
+    setSyncStatus(`數據及價格已更新 · ${twFull(latestPriceAt)}`);
+    return state;
+  } catch(e) {
+    setSyncStatus(`更新失敗：${e.message}`, true);
+    return null;
   } finally {
     if(button) button.disabled = false;
   }
@@ -409,6 +419,7 @@ async function syncServerState(showStatus=false){
     const data = await serverRequest('/state');
     if(data.state){
       state = data.state;
+      applyLatestPrices();
       localStorage.setItem('lanaaiMomentumClaude', JSON.stringify(state));
       if(typeof state.initialEquity === 'number') CFG.initialEquity = state.initialEquity;
       if(typeof state.riskPerTrade === 'number') CFG.riskPerTrade = state.riskPerTrade;
@@ -426,6 +437,30 @@ async function syncServerState(showStatus=false){
     console.warn('syncServerState', e);
     return null;
   }
+}
+
+function applyLatestPrices(){
+  for(const signal of state.signals || []){
+    const price = latestPrices[signal.instId];
+    if(price?.last) signal.lastPrice = price.last;
+  }
+  for(const position of state.positions || []){
+    const price = latestPrices[position.instId];
+    if(price?.last){
+      position.last = price.last;
+      position.lastTime = price.timestamp || latestPriceAt;
+    }
+  }
+}
+
+async function refreshServerPrices(){
+  if(!SERVER_MODE) return null;
+  const data = await serverRequest('/prices');
+  latestPrices = data.prices || {};
+  latestPriceAt = Number(data.fetchedAt || nowMs());
+  applyLatestPrices();
+  paintAll();
+  return data;
 }
 
 async function updateServerConfig(){
@@ -1003,6 +1038,8 @@ function paintAll(){
 
   const signalSummary = document.getElementById('signalSummary');
   if(signalSummary) signalSummary.textContent = `${state.signals.length} candidates · last scan ${state.lastScanAt ? tw(state.lastScanAt) : 'never'}`;
+  const priceStatus = document.getElementById('priceStatus');
+  if(priceStatus) priceStatus.textContent = latestPriceAt ? `最新價格：${twFull(latestPriceAt)}` : '最新價格：尚未更新';
   const notifyStatus = document.getElementById('notifyStatus');
   const lastNotification = state.lastNotification;
   if(notifyStatus){

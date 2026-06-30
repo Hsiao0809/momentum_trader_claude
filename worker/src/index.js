@@ -65,6 +65,12 @@ async function handleRequest(request, env) {
       return json({ ok: true, state: await loadState(env) });
     }
 
+    if (request.method === 'GET' && url.pathname === '/prices') {
+      const state = await loadState(env);
+      const prices = await currentPrices(state);
+      return json({ ok: true, fetchedAt: Date.now(), prices });
+    }
+
     if (request.method === 'POST' && url.pathname === '/start') {
       const body = await readJson(request);
       const state = await loadState(env);
@@ -481,6 +487,26 @@ async function rankedInstruments(cfg) {
 async function tickerPrice(instId) {
   const data = await okx('/api/v5/market/ticker', { instId });
   return Number(data?.[0]?.last || 0);
+}
+
+async function currentPrices(state) {
+  const wanted = new Set(
+    [...(state.signals || []), ...(state.positions || [])]
+      .map((item) => item.instId)
+      .filter(Boolean),
+  );
+  if (!wanted.size) return {};
+
+  const tickers = await okx('/api/v5/market/tickers', { instType: 'SWAP' });
+  return Object.fromEntries(tickers
+    .filter((ticker) => wanted.has(ticker.instId))
+    .map((ticker) => [ticker.instId, {
+      instId: ticker.instId,
+      symbol: symbolFromInstId(ticker.instId),
+      last: Number(ticker.last || 0),
+      timestamp: Number(ticker.ts || Date.now()),
+    }])
+    .filter(([, price]) => Number.isFinite(price.last) && price.last > 0));
 }
 
 async function klines(instId, interval = '15m', limit = 130) {
