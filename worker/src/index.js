@@ -79,6 +79,12 @@ async function handleRequest(request, env) {
       return json({ ok: true, fetchedAt: Date.now(), prices });
     }
 
+    if (request.method === 'GET' && url.pathname === '/snapshot') {
+      const state = await loadState(env);
+      const prices = await currentPrices(state);
+      return json({ ok: true, fetchedAt: Date.now(), state, prices });
+    }
+
     if (request.method === 'POST' && url.pathname === '/start') {
       const body = await readJson(request);
       const state = await loadState(env);

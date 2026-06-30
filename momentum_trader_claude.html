@@ -230,6 +230,7 @@ const FAPI = 'https://fapi.binance.com';
 const PAPER_API = 'https://momentum-trader-claude-runner.siaosiao1016.workers.dev';
 const SERVER_MODE = Boolean(PAPER_API);
 const INTERVAL_MS = { '15m': 900000 };
+const LIVE_REFRESH_MS = 30000;
 const TZ = 'Asia/Taipei';
 const LABELS = {
   pullback_uptrend: '上升趨勢回檔',
@@ -260,6 +261,8 @@ const CFG = {
 let state = loadState();
 let latestPrices = {};
 let latestPriceAt = 0;
+let liveRefreshTimer = null;
+let liveRefreshPromise = null;
 let autoScanTimer = null;
 let paperTickRunning = false;
 
@@ -399,14 +402,12 @@ async function syncNow(){
   const button = document.getElementById('refreshCurrentData');
   if(button) button.disabled = true;
   try {
-    const current = await syncServerState(false);
-    if(!current) throw new Error('Worker state unavailable');
-    await refreshServerPrices();
-    setSyncStatus(`數據及價格已更新 · ${twFull(latestPriceAt)}`);
-    return state;
-  } catch(e) {
-    setSyncStatus(`更新失敗：${e.message}`, true);
-    return null;
+    const current = await refreshServerSnapshot(false);
+    setSyncStatus(
+      current ? `數據及價格已更新 · ${twFull(latestPriceAt)}` : '更新失敗：Worker 暫時無法連線',
+      !current,
+    );
+    return current;
   } finally {
     if(button) button.disabled = false;
   }
@@ -446,19 +447,7 @@ async function syncServerState(showStatus=false){
   if(!SERVER_MODE) return null;
   try {
     const data = await serverRequest('/state');
-    if(data.state){
-      state = data.state;
-      applyLatestPrices();
-      localStorage.setItem('lanaaiMomentumClaude', JSON.stringify(state));
-      if(typeof state.initialEquity === 'number') CFG.initialEquity = state.initialEquity;
-      if(typeof state.riskPerTrade === 'number') CFG.riskPerTrade = state.riskPerTrade;
-      if(state.cfg?.riskPerTrade) CFG.riskPerTrade = state.cfg.riskPerTrade;
-      const riskEl = document.getElementById('riskPct');
-      const equityEl = document.getElementById('initialEquity');
-      if(riskEl) riskEl.value = (CFG.riskPerTrade * 100).toFixed(2).replace(/\.00$/, '');
-      if(equityEl) equityEl.value = state.initialEquity ?? CFG.initialEquity;
-      paintAll();
-    }
+    if(data.state) applyServerState(data.state);
     if(showStatus) setSyncStatus(`數據已更新 · ${tw(nowMs())}`);
     return state;
   } catch(e) {
@@ -466,6 +455,20 @@ async function syncServerState(showStatus=false){
     console.warn('syncServerState', e);
     return null;
   }
+}
+
+function applyServerState(nextState){
+  state = nextState;
+  applyLatestPrices();
+  localStorage.setItem('lanaaiMomentumClaude', JSON.stringify(state));
+  if(typeof state.initialEquity === 'number') CFG.initialEquity = state.initialEquity;
+  if(typeof state.riskPerTrade === 'number') CFG.riskPerTrade = state.riskPerTrade;
+  if(state.cfg?.riskPerTrade) CFG.riskPerTrade = state.cfg.riskPerTrade;
+  const riskEl = document.getElementById('riskPct');
+  const equityEl = document.getElementById('initialEquity');
+  if(riskEl) riskEl.value = (CFG.riskPerTrade * 100).toFixed(2).replace(/\.00$/, '');
+  if(equityEl) equityEl.value = state.initialEquity ?? CFG.initialEquity;
+  paintAll();
 }
 
 function applyLatestPrices(){
@@ -490,6 +493,57 @@ async function refreshServerPrices(){
   applyLatestPrices();
   paintAll();
   return data;
+}
+
+async function refreshServerSnapshot(showStatus=false){
+  if(!SERVER_MODE) return null;
+  if(liveRefreshPromise) return liveRefreshPromise;
+
+  liveRefreshPromise = (async () => {
+    try {
+      const data = await serverRequest('/snapshot');
+      latestPrices = data.prices || {};
+      latestPriceAt = Number(data.fetchedAt || nowMs());
+      if(data.state) applyServerState(data.state);
+      if(showStatus) setSyncStatus(`數據及價格已更新 · ${twFull(latestPriceAt)}`);
+      return state;
+    } catch(e) {
+      if(showStatus) setSyncStatus(`更新失敗：${e.message}`, true);
+      console.warn('refreshServerSnapshot', e);
+      return null;
+    } finally {
+      liveRefreshPromise = null;
+    }
+  })();
+
+  return liveRefreshPromise;
+}
+
+function stopLiveRefresh(){
+  if(liveRefreshTimer){
+    clearInterval(liveRefreshTimer);
+    liveRefreshTimer = null;
+  }
+}
+
+function startLiveRefresh(){
+  stopLiveRefresh();
+  if(!SERVER_MODE || document.hidden) return;
+  liveRefreshTimer = setInterval(() => refreshServerSnapshot(false), LIVE_REFRESH_MS);
+}
+
+function setupLiveRefresh(){
+  if(!SERVER_MODE) return;
+  const handleVisibility = () => {
+    if(document.hidden){
+      stopLiveRefresh();
+      return;
+    }
+    refreshServerSnapshot(false);
+    startLiveRefresh();
+  };
+  document.addEventListener('visibilitychange', handleVisibility);
+  handleVisibility();
 }
 
 async function updateServerConfig(){
@@ -1235,9 +1289,8 @@ paintAll();
 setupCapitalInputs();
 setupAutoScan();
 setupCloudSync();
-if(SERVER_MODE) syncServerState(true);
-setInterval(() => { if(SERVER_MODE) syncServerState(false); }, 15000);
-setInterval(() => { if(state.running) paperTick(); }, 60000);
+setupLiveRefresh();
+setInterval(() => { if(state.running && !SERVER_MODE) paperTick(); }, 60000);
 setInterval(refreshSignalPrices, 60000);
 setInterval(refreshMarks, 15000);
 setInterval(() => { if(state.positions.length || state.running) drawSpark(), updateStatusLine(state.running ? `Paper running · ${state.positions.length} open · ${tw(nowMs())}` : `Ready · ${tw(nowMs())}`); }, 30000);
