@@ -29,6 +29,7 @@
     button:hover{filter:brightness(1.08)}
     button:active{transform:translateY(1px)}
     button.icon-btn{width:28px;min-width:28px;padding:0;display:inline-grid;place-items:center;font-size:17px;font-weight:400}
+    button.icon-btn.active{color:var(--green);border-color:var(--green);background:rgba(123,174,113,.08)}
     button.ghost{background:transparent;color:var(--text);border:1px solid var(--border)}
     button.ghost:hover{background:var(--panel2);border-color:var(--accent);color:var(--accent)}
     button.danger{background:transparent;color:var(--red);border:1px solid rgba(217,117,106,.4)}
@@ -87,6 +88,7 @@
   <div class="controls">
     <button onclick="scanSignals()">Scan Signals</button>
     <button id="refreshCurrentData" class="ghost icon-btn" onclick="syncNow()" aria-label="更新當前數據" title="更新 Worker 狀態與最新市場價格，不執行新掃描">↻</button>
+    <button id="browserNotifyButton" class="ghost icon-btn" onclick="toggleBrowserNotifications()" aria-label="切換瀏覽器通知" title="啟用瀏覽器新單通知">🔔</button>
     <button class="ghost" onclick="runBacktest()">Run Backtest</button>
     <button class="ghost" onclick="startPaper()">Start Paper</button>
     <button class="ghost" onclick="stopPaper()">Stop Paper</button>
@@ -231,6 +233,8 @@ const PAPER_API = 'https://momentum-trader-claude-runner.siaosiao1016.workers.de
 const SERVER_MODE = Boolean(PAPER_API);
 const INTERVAL_MS = { '15m': 900000 };
 const LIVE_REFRESH_MS = 30000;
+const BROWSER_NOTIFY_ENABLED_KEY = 'momentumBrowserNotificationsEnabled';
+const BROWSER_NOTIFY_SEEN_KEY = 'momentumLastBrowserNotificationId';
 const TZ = 'Asia/Taipei';
 const LABELS = {
   pullback_uptrend: '上升趨勢回檔',
@@ -458,6 +462,7 @@ async function syncServerState(showStatus=false){
 }
 
 function applyServerState(nextState){
+  maybeShowBrowserNotification(nextState);
   state = nextState;
   applyLatestPrices();
   localStorage.setItem('lanaaiMomentumClaude', JSON.stringify(state));
@@ -544,6 +549,69 @@ function setupLiveRefresh(){
   };
   document.addEventListener('visibilitychange', handleVisibility);
   handleVisibility();
+}
+
+function browserNotificationsEnabled(){
+  return 'Notification' in window &&
+    Notification.permission === 'granted' &&
+    localStorage.getItem(BROWSER_NOTIFY_ENABLED_KEY) === '1';
+}
+
+function updateBrowserNotifyButton(){
+  const button = document.getElementById('browserNotifyButton');
+  if(!button) return;
+  const enabled = browserNotificationsEnabled();
+  button.classList.toggle('active', enabled);
+  button.title = enabled ? '停用瀏覽器新單通知' : '啟用瀏覽器新單通知';
+}
+
+async function toggleBrowserNotifications(){
+  if(!('Notification' in window)){
+    setSyncStatus('此瀏覽器不支援系統通知', true);
+    return;
+  }
+  if(browserNotificationsEnabled()){
+    localStorage.setItem(BROWSER_NOTIFY_ENABLED_KEY, '0');
+    updateBrowserNotifyButton();
+    setSyncStatus('瀏覽器通知已停用');
+    return;
+  }
+  const permission = await Notification.requestPermission();
+  if(permission !== 'granted'){
+    localStorage.setItem(BROWSER_NOTIFY_ENABLED_KEY, '0');
+    updateBrowserNotifyButton();
+    setSyncStatus('瀏覽器通知未獲允許', true);
+    return;
+  }
+  localStorage.setItem(BROWSER_NOTIFY_ENABLED_KEY, '1');
+  const currentId = state.lastNotification?.positionId || '';
+  if(currentId) localStorage.setItem(BROWSER_NOTIFY_SEEN_KEY, currentId);
+  updateBrowserNotifyButton();
+  new Notification('Claude Momentum', { body:'瀏覽器新單通知已啟用。' });
+}
+
+function maybeShowBrowserNotification(nextState){
+  if(!browserNotificationsEnabled()) return;
+  const record = nextState?.lastNotification;
+  const notificationId = record?.positionId || '';
+  if(!notificationId || localStorage.getItem(BROWSER_NOTIFY_SEEN_KEY) === notificationId) return;
+  localStorage.setItem(BROWSER_NOTIFY_SEEN_KEY, notificationId);
+  const position = (nextState.positions || []).find(item => item.id === notificationId);
+  const side = position?.side === 'short' ? '空單' : '多單';
+  const strategy = position ? strategyName(position) : '';
+  const body = [side, strategy, position?.entry ? `進場 ${fmt(position.entry, 8)}` : ''].filter(Boolean).join(' · ');
+  const notification = new Notification(`新模擬單 · ${record.symbol || position?.symbol || ''}`, { body });
+  notification.onclick = () => {
+    window.focus();
+    notification.close();
+  };
+}
+
+function setupBrowserNotifications(){
+  updateBrowserNotifyButton();
+  if('Notification' in window && Notification.permission !== 'granted'){
+    localStorage.setItem(BROWSER_NOTIFY_ENABLED_KEY, '0');
+  }
 }
 
 async function updateServerConfig(){
@@ -1289,6 +1357,7 @@ paintAll();
 setupCapitalInputs();
 setupAutoScan();
 setupCloudSync();
+setupBrowserNotifications();
 setupLiveRefresh();
 setInterval(() => { if(state.running && !SERVER_MODE) paperTick(); }, 60000);
 setInterval(refreshSignalPrices, 60000);

@@ -163,6 +163,11 @@ async function runPaperTick(env, options = {}) {
     state.lastRunReason = options.reason || 'unknown';
     state.marketProvider = 'okx-usdt-swap';
 
+    recoverLastFailedNotification(state);
+    if (await flushPendingNotifications(state, env)) {
+      await saveState(env, state);
+    }
+
     if (!state.running && !state.positions.length && !options.forceScan && !options.onlyScan) {
       return;
     }
@@ -217,6 +222,7 @@ function defaultState() {
     trades: [],
     equityCurve: [],
     notificationLog: [],
+    pendingNotifications: [],
     backtest: null,
     lastScanAt: 0,
     lastCoreScanAt: 0,
@@ -250,6 +256,7 @@ function normalizeState(state) {
     trades: Array.isArray(state.trades) ? state.trades : [],
     equityCurve: Array.isArray(state.equityCurve) ? state.equityCurve : [],
     notificationLog: Array.isArray(state.notificationLog) ? state.notificationLog.slice(0, 100) : [],
+    pendingNotifications: Array.isArray(state.pendingNotifications) ? state.pendingNotifications.slice(0, 20) : [],
   };
   normalizeStrategyLabels(normalized.signals);
   normalizeStrategyLabels(normalized.positions);
@@ -640,9 +647,25 @@ function takeTP1(state, p) {
 }
 
 async function notifyNewPosition(env, position, state) {
+  const message = positionNotificationText(position);
+  const result = await sendNotification(env, message, { type: 'new_position', position, equity: state.equity });
+  const record = {
+    type: 'new_position',
+    symbol: position.symbol,
+    positionId: position.id,
+    createdAt: Date.now(),
+    pending: result.configured > 0 && result.sent === 0,
+    ...result,
+  };
+  storeNotificationRecord(state, record);
+  if (record.pending) queuePositionNotification(state, position, message, record.createdAt);
+  return result;
+}
+
+function positionNotificationText(position) {
   const sideText = position.side === 'short' ? '空單' : '多單';
   const reasons = (position.reasons || []).slice(0, 3).join('\n- ');
-  const message = [
+  return [
     `新模擬單：${position.symbol} ${sideText}`,
     `策略：${position.strategyLabel || position.strategyKey}`,
     `分數：${position.score}`,
@@ -653,18 +676,64 @@ async function notifyNewPosition(env, position, state) {
     reasons ? `理由：\n- ${reasons}` : '',
     `時間：${new Date(position.entryTime).toISOString()}`,
   ].filter(Boolean).join('\n');
+}
 
-  const result = await sendNotification(env, message, { type: 'new_position', position, equity: state.equity });
-  const record = {
+function queuePositionNotification(state, position, text, createdAt) {
+  const pending = {
+    id: `notification_${position.id}`,
     type: 'new_position',
     symbol: position.symbol,
     positionId: position.id,
-    createdAt: Date.now(),
-    ...result,
+    createdAt,
+    text,
+    payload: { type: 'new_position', position, equity: state.equity },
+    deliveryCycles: 0,
   };
+  state.pendingNotifications = [
+    pending,
+    ...(state.pendingNotifications || []).filter((item) => item.positionId !== position.id),
+  ].slice(0, 20);
+}
+
+function recoverLastFailedNotification(state) {
+  const last = state.lastNotification;
+  if (!last || last.type !== 'new_position' || last.sent !== 0 || Number(last.deliveryCycles || 0) >= 12) return;
+  if ((state.pendingNotifications || []).some((item) => item.positionId === last.positionId)) return;
+  const position = (state.positions || []).find((item) => item.id === last.positionId);
+  if (position) queuePositionNotification(state, position, positionNotificationText(position), last.createdAt || Date.now());
+}
+
+function storeNotificationRecord(state, record) {
   state.lastNotification = record;
-  state.notificationLog = [record, ...(state.notificationLog || [])].slice(0, 100);
-  return result;
+  state.notificationLog = [
+    record,
+    ...(state.notificationLog || []).filter((item) => item.positionId !== record.positionId),
+  ].slice(0, 100);
+}
+
+async function flushPendingNotifications(state, env) {
+  const pending = state.pendingNotifications || [];
+  if (!pending.length) return false;
+
+  const remaining = [];
+  for (const item of pending.slice(0, 2)) {
+    const result = await sendNotification(env, item.text, item.payload);
+    const deliveryCycles = Number(item.deliveryCycles || 0) + 1;
+    const record = {
+      type: item.type,
+      symbol: item.symbol,
+      positionId: item.positionId,
+      createdAt: item.createdAt,
+      retriedAt: Date.now(),
+      deliveryCycles,
+      pending: result.configured > 0 && result.sent === 0 && deliveryCycles < 12,
+      ...result,
+    };
+    storeNotificationRecord(state, record);
+    if (record.pending) remaining.push({ ...item, deliveryCycles });
+  }
+  state.pendingNotifications = [...remaining, ...pending.slice(2)].slice(0, 20);
+  return true;
 }
 
 async function sendNotification(env, text, payload = {}) {
@@ -733,6 +802,7 @@ async function sendNotificationWithRetry(task) {
       if (response.status < 500 && response.status !== 429) break;
     } catch (error) {
       lastFailure = { ok: false, channel: task.channel, attempts: attempt, error: String(error) };
+      if (lastFailure.error.includes('Too many subrequests')) break;
     }
 
     if (attempt < maxAttempts) await sleep(500 * (2 ** (attempt - 1)));
