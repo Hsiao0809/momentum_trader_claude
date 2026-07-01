@@ -393,6 +393,8 @@ async function openNewPositions(state, env) {
       beTrigger: sig.beTrigger,
       lockTrigger: sig.lockTrigger,
       lockLevel: sig.lockLevel,
+      bePartialEnabled: true,
+      bePartialDone: false,
       tp1Done: false,
       trailPct: sig.trailPct,
       highest: sig.entry,
@@ -400,6 +402,7 @@ async function openNewPositions(state, env) {
       score: sig.score,
       riskUsdt: sized.riskUsdt,
       realizedPnl: 0,
+      partialExits: [],
       reasons: sig.reasons,
     };
     state.positions.push(position);
@@ -428,6 +431,7 @@ async function updatePositions(state, options = {}) {
         p.lowest = Math.min(p.lowest || p.entry, low);
         p.last = close;
 
+        takeBreakEvenPartial(state, p, kTime(bar));
         const effectiveStop = effectiveStopFor(p);
         if (p.side === 'short' ? high >= effectiveStop : low <= effectiveStop) {
           closePosition(state, p, effectiveStop, stopReasonFor(p), kTime(bar));
@@ -435,7 +439,7 @@ async function updatePositions(state, options = {}) {
           break;
         }
         if (!p.tp1Done && (p.side === 'short' ? low <= p.tp1 : high >= p.tp1)) {
-          takeTP1(state, p);
+          takeTP1(state, p, kTime(bar));
         }
         if (kTime(bar) >= p.entryTime + state.cfg.maxHoldHours * 60 * 60 * 1000) {
           closePosition(state, p, close, 'time_exit', kTime(bar));
@@ -449,12 +453,13 @@ async function updatePositions(state, options = {}) {
         p.last = price;
         p.highest = Math.max(p.highest || p.entry, price);
         p.lowest = Math.min(p.lowest || p.entry, price);
+        takeBreakEvenPartial(state, p, Date.now());
         const effectiveStop = effectiveStopFor(p);
         if (p.side === 'short' ? price >= effectiveStop : price <= effectiveStop) {
           closePosition(state, p, effectiveStop, stopReasonFor(p), Date.now());
           closed = true;
         } else if (!p.tp1Done && (p.side === 'short' ? price <= p.tp1 : price >= p.tp1)) {
-          takeTP1(state, p);
+          takeTP1(state, p, Date.now());
         }
       }
     } catch (error) {
@@ -663,7 +668,7 @@ function closePosition(state, p, exit, reason, exitTime) {
   state.peakEquity = Math.max(state.peakEquity, state.equity);
   const mfePct = p.side === 'short' ? (p.entry - (p.lowest || p.entry)) / p.entry * 100 : pct(p.entry, p.highest) || 0;
   const maePct = p.side === 'short' ? (p.entry - (p.highest || p.entry)) / p.entry * 100 : pct(p.entry, p.lowest) || 0;
-  state.trades.unshift({ symbol: p.symbol, instId: p.instId, strategyKey: p.strategyKey, strategyLabel: p.strategyLabel, side: p.side || 'long', entryTime: p.entryTime, exitTime, entry: p.entry, exit, qty: p.qty, pnl: totalPnl, rMultiple: safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct, maePct, score: p.score });
+  state.trades.unshift({ symbol: p.symbol, instId: p.instId, strategyKey: p.strategyKey, strategyLabel: p.strategyLabel, side: p.side || 'long', entryTime: p.entryTime, exitTime, entry: p.entry, exit, qty: p.qty, pnl: totalPnl, rMultiple: safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct, maePct, score: p.score, partialExits: p.partialExits || [] });
   state.trades = state.trades.slice(0, 500);
   state.equityCurve.push({ timeMs: exitTime, equity: state.equity, drawdownPct: safeDiv(state.peakEquity - state.equity, state.peakEquity, 0) * 100 });
   state.equityCurve = state.equityCurve.slice(-1000);
@@ -675,7 +680,29 @@ function closePosition(state, p, exit, reason, exitTime) {
   if (safeDiv(state.peakEquity - state.equity, state.peakEquity, 0) >= 0.12) state.running = false;
 }
 
-function takeTP1(state, p) {
+function takeBreakEvenPartial(state, p, exitTime) {
+  if (!p.bePartialEnabled || p.bePartialDone || p.tp1Done || !p.beTrigger) return false;
+  const triggered = p.side === 'short'
+    ? (p.lowest || p.entry) <= p.beTrigger
+    : (p.highest || p.entry) >= p.beTrigger;
+  if (!triggered) return false;
+
+  const closeQty = p.remainingQty * 0.5;
+  const partialPnl = p.side === 'short'
+    ? closeQty * (p.entry - p.beTrigger)
+    : closeQty * (p.beTrigger - p.entry);
+  state.equity += partialPnl;
+  state.peakEquity = Math.max(state.peakEquity, state.equity);
+  p.realizedPnl = (p.realizedPnl || 0) + partialPnl;
+  p.remainingQty -= closeQty;
+  p.bePartialDone = true;
+  p.stop = p.entry;
+  p.partialExits = p.partialExits || [];
+  p.partialExits.push({ type: 'be_partial', exitTime, exit: p.beTrigger, qty: closeQty, pnl: partialPnl });
+  return true;
+}
+
+function takeTP1(state, p, exitTime) {
   const sellQty = p.remainingQty * 0.5;
   const tpPnl = p.side === 'short' ? sellQty * (p.entry - p.tp1) : sellQty * (p.tp1 - p.entry);
   state.equity += tpPnl;
@@ -684,6 +711,8 @@ function takeTP1(state, p) {
   p.remainingQty -= sellQty;
   p.tp1Done = true;
   p.stop = p.entry;
+  p.partialExits = p.partialExits || [];
+  p.partialExits.push({ type: 'tp1', exitTime, exit: p.tp1, qty: sellQty, pnl: tpPnl });
 }
 
 async function notifyNewPosition(env, position, state) {

@@ -1079,7 +1079,7 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
   const risk = buildRisk(entry, atrValue, side);
   const originalStop = risk.stop;
   const sized = positionSize(equity, entry, risk.stop);
-  let remainingQty = sized.qty, realized = 0, tp1Done = false, stop = risk.stop;
+  let remainingQty = sized.qty, realized = 0, bePartialDone = false, tp1Done = false, stop = risk.stop;
   let highest = entry, lowest = entry, mfe = 0, mae = 0;
   const lastIndex = Math.min(rows.length - 1, entryIndex + Math.floor(CFG.maxHoldHours * 60 / 15));
   let exit = kClose(rows[lastIndex]), exitTime = kTime(rows[lastIndex]), reason = 'time_exit';
@@ -1089,6 +1089,13 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
     if(side === 'short'){
       mfe = Math.max(mfe, (entry - low)  / entry * 100);
       mae = Math.min(mae, (entry - high) / entry * 100);
+      if(!bePartialDone && low <= risk.beTrigger){
+        const sq=remainingQty*0.5;
+        realized+=sq*(entry-risk.beTrigger);
+        remainingQty-=sq;
+        bePartialDone=true;
+        stop=entry;
+      }
       const es = tp1Done ? Math.min(risk.lockLevel, lowest*(1+risk.trailPct/100))
                : lowest <= risk.lockTrigger ? Math.min(stop, risk.lockLevel)
                : lowest <= risk.beTrigger   ? Math.min(stop, entry) : stop;
@@ -1101,6 +1108,13 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
     } else {
       mfe = Math.max(mfe, pct(entry, high) || 0);
       mae = Math.min(mae, pct(entry, low)  || 0);
+      if(!bePartialDone && high >= risk.beTrigger){
+        const sq=remainingQty*0.5;
+        realized+=sq*(risk.beTrigger-entry);
+        remainingQty-=sq;
+        bePartialDone=true;
+        stop=entry;
+      }
       const es = tp1Done ? Math.max(risk.lockLevel, highest*(1-risk.trailPct/100))
                : highest >= risk.lockTrigger ? Math.max(stop, risk.lockLevel)
                : highest >= risk.beTrigger   ? Math.max(stop, entry) : stop;
@@ -1238,7 +1252,7 @@ async function paperTick(){
     if(openSymbols.has(sig.symbol) || stoppedRecent.has(sig.symbol) || sig.score < CFG.paperMinScore) continue;
     const sized = positionSize(state.equity, sig.entry, sig.stop);
     if(totalRisk + sized.riskUsdt > state.equity * CFG.maxTotalRisk) break;
-    state.positions.push({ id:`p_${nowMs()}_${sig.symbol}`, symbol:sig.symbol, strategyKey:sig.strategyKey, strategyLabel:sig.strategyLabel, side:sig.side||'long', entryTime:nowMs(), lastTime:nowMs(), entry:sig.entry, last:sig.entry, qty:sized.qty, remainingQty:sized.qty, stop:sig.stop, originalStop:sig.stop, tp1:sig.tp1, beTrigger:sig.beTrigger, lockTrigger:sig.lockTrigger, lockLevel:sig.lockLevel, tp1Done:false, trailPct:sig.trailPct, highest:sig.entry, lowest:sig.entry, score:sig.score, riskUsdt:sized.riskUsdt, realizedPnl:0, reasons:sig.reasons });
+    state.positions.push({ id:`p_${nowMs()}_${sig.symbol}`, symbol:sig.symbol, strategyKey:sig.strategyKey, strategyLabel:sig.strategyLabel, side:sig.side||'long', entryTime:nowMs(), lastTime:nowMs(), entry:sig.entry, last:sig.entry, qty:sized.qty, remainingQty:sized.qty, stop:sig.stop, originalStop:sig.stop, tp1:sig.tp1, beTrigger:sig.beTrigger, lockTrigger:sig.lockTrigger, lockLevel:sig.lockLevel, bePartialEnabled:true, bePartialDone:false, tp1Done:false, trailPct:sig.trailPct, highest:sig.entry, lowest:sig.entry, score:sig.score, riskUsdt:sized.riskUsdt, realizedPnl:0, partialExits:[], reasons:sig.reasons });
     totalRisk += sized.riskUsdt; openSymbols.add(sig.symbol);
   }
   saveState();
@@ -1253,13 +1267,33 @@ function closePosition(p, exit, reason, exitTime){
   state.peakEquity = Math.max(state.peakEquity, state.equity);
   const mfePct = p.side === 'short' ? (p.entry-(p.lowest||p.entry))/p.entry*100 : pct(p.entry,p.highest)||0;
   const maePct = p.side === 'short' ? (p.entry-(p.highest||p.entry))/p.entry*100 : pct(p.entry,p.lowest)||0;
-  state.trades.unshift({ symbol:p.symbol, strategyKey:p.strategyKey, strategyLabel:p.strategyLabel, side:p.side||'long', entryTime:p.entryTime, exitTime, entry:p.entry, exit, qty:p.qty, pnl:totalPnl, rMultiple:safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct, maePct, score:p.score });
+  state.trades.unshift({ symbol:p.symbol, strategyKey:p.strategyKey, strategyLabel:p.strategyLabel, side:p.side||'long', entryTime:p.entryTime, exitTime, entry:p.entry, exit, qty:p.qty, pnl:totalPnl, rMultiple:safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct, maePct, score:p.score, partialExits:p.partialExits||[] });
   state.equityCurve.push({ timeMs:exitTime, equity:state.equity, drawdownPct:safeDiv(state.peakEquity-state.equity, state.peakEquity, 0)*100 });
   state.consecutiveLosses = totalPnl < 0 ? state.consecutiveLosses + 1 : 0;
   if(state.consecutiveLosses >= 3){ state.pausedUntil = nowMs() + 6*60*60*1000; state.consecutiveLosses = 0; }
   if(safeDiv(state.peakEquity-state.equity, state.peakEquity, 0) >= 0.12) state.running = false;
 }
-function takeTP1(p){
+function takeBreakEvenPartial(p, exitTime){
+  if(!p.bePartialEnabled || p.bePartialDone || p.tp1Done || !p.beTrigger) return false;
+  const triggered = p.side === 'short'
+    ? (p.lowest || p.entry) <= p.beTrigger
+    : (p.highest || p.entry) >= p.beTrigger;
+  if(!triggered) return false;
+  const closeQty = p.remainingQty * 0.5;
+  const partialPnl = p.side === 'short'
+    ? closeQty * (p.entry - p.beTrigger)
+    : closeQty * (p.beTrigger - p.entry);
+  state.equity += partialPnl;
+  state.peakEquity = Math.max(state.peakEquity, state.equity);
+  p.realizedPnl = (p.realizedPnl || 0) + partialPnl;
+  p.remainingQty -= closeQty;
+  p.bePartialDone = true;
+  p.stop = p.entry;
+  p.partialExits = p.partialExits || [];
+  p.partialExits.push({ type:'be_partial', exitTime, exit:p.beTrigger, qty:closeQty, pnl:partialPnl });
+  return true;
+}
+function takeTP1(p, exitTime){
   const sellQty = p.remainingQty * 0.5;
   const tpPnl = p.side === 'short' ? sellQty*(p.entry-p.tp1) : sellQty*(p.tp1-p.entry);
   state.equity += tpPnl;
@@ -1268,6 +1302,8 @@ function takeTP1(p){
   p.remainingQty -= sellQty;
   p.tp1Done = true;
   p.stop = p.entry;
+  p.partialExits = p.partialExits || [];
+  p.partialExits.push({ type:'tp1', exitTime, exit:p.tp1, qty:sellQty, pnl:tpPnl });
 }
 
 async function updatePositions(){
@@ -1282,13 +1318,14 @@ async function updatePositions(){
         const high = kHigh(bar), low = kLow(bar), close = kClose(bar);
         p.highest = Math.max(p.highest, high); p.lowest = Math.min(p.lowest, low);
         p.last = close;
+        takeBreakEvenPartial(p, kTime(bar));
         const effectiveStop = effectiveStopFor(p);
         if(p.side==='short' ? high>=effectiveStop : low<=effectiveStop){
           closePosition(p, effectiveStop, stopReasonFor(p), kTime(bar));
           closed = true; break;
         }
         if(!p.tp1Done && (p.side==='short' ? low<=p.tp1 : high>=p.tp1)){
-          takeTP1(p);
+          takeTP1(p, kTime(bar));
         }
         if(kTime(bar) >= p.entryTime + CFG.maxHoldHours*60*60*1000){
           closePosition(p, close, 'time_exit', kTime(bar));
@@ -1334,6 +1371,7 @@ async function refreshMarks(){
       if(price < (p.lowest || Infinity)) p.lowest = price;
       changed = true;
       if(state.running){
+        takeBreakEvenPartial(p, nowMs());
         const effectiveStop = effectiveStopFor(p);
         const exitReason = stopReasonFor(p);
         if(p.side==='short' ? price>=effectiveStop : price<=effectiveStop){
@@ -1343,7 +1381,7 @@ async function refreshMarks(){
           return;
         }
         if(!p.tp1Done && (p.side==='short' ? price<=p.tp1 : price>=p.tp1)){
-          takeTP1(p);
+          takeTP1(p, nowMs());
           log(`TP1 觸發 · ${p.symbol} @ ${fmt(p.tp1,8)}`);
         }
       }
@@ -1810,7 +1848,7 @@ function paintAll(){
       : lockHit
       ? `<span class="pill live" style="font-size:.65rem;margin-right:2px">鎖</span><span class="pos">${fmt(effectiveStop,8)}</span>`
       : beHit
-      ? `<span class="pill live" style="font-size:.65rem;margin-right:2px">保</span><span class="pos">${fmt(effectiveStop,8)}</span>`
+      ? `<span class="pill live" style="font-size:.65rem;margin-right:2px">${p.bePartialDone?'半':'保'}</span><span class="pos">${fmt(effectiveStop,8)}</span>`
       : `<span class="neg">${fmt(p.stop,8)}</span>`;
     const tp1Cell = p.tp1Done
       ? `<span class="pos">✓ ${fmt(p.tp1,8)}</span>`
