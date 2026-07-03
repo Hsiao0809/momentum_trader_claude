@@ -252,7 +252,7 @@
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th class="sym">Symbol</th><th>Score</th><th class="left">Strategy</th><th>Entry</th><th>現價</th><th>Δ%</th><th>Stop</th><th>TP1</th><th>Trail%</th><th>1H%</th><th>4H%</th><th>24H%</th><th>24H pos</th><th>Vol x</th><th class="left">Reasons</th>
+          <th class="sym">Symbol</th><th>Score</th><th class="left">Strategy</th><th>多空</th><th>Entry</th><th>現價</th><th>Δ%</th><th>Stop</th><th>TP1</th><th>Trail%</th><th>1H%</th><th>4H%</th><th>24H%</th><th>24H pos</th><th>Vol x</th><th class="left">Reasons</th>
         </tr></thead>
         <tbody id="signalsBody"></tbody>
       </table>
@@ -293,6 +293,7 @@
         <select id="tradeStrategyFilter" class="trade-filter" aria-label="依策略篩選交易" title="依策略篩選" onchange="paintAll()">
           <option value="">全部策略</option>
           <option value="pullback_uptrend">上升趨勢回檔</option>
+          <option value="rally_downtrend">下降趨勢反彈</option>
           <option value="strong_momentum_breakout">強動量突破追價</option>
           <option value="volume_ignition">放量啟動追隨</option>
           <option value="high_range_continuation">高位續勢承接</option>
@@ -1883,8 +1884,9 @@ function paintAll(){
     const delta = lastP ? pct(s.entry, lastP) : null;
     const lastPriceCell = lastP ? fmt(lastP,8) : '<span class="muted">—</span>';
     const deltaCell = delta !== null ? `<span class="${signedClass(delta)}">${showPct(delta)}</span>` : '<span class="muted">—</span>';
-    return `<tr><td class="sym">${symLink(s.symbol)}</td><td><span class="${scoreClass}">${fmt(s.score,0)}</span></td><td class="left">${htmlEscape(strategyName(s))}</td><td>${fmt(s.entry,8)}</td><td>${lastPriceCell}</td><td>${deltaCell}</td><td class="neg">${fmt(s.stop,8)}</td><td class="pos">${fmt(s.tp1,8)}</td><td>${showPct(s.trailPct)}</td><td class="${signedClass(m.momentum1h)}">${showPct(m.momentum1h)}</td><td class="${signedClass(m.momentum4h)}">${showPct(m.momentum4h)}</td><td class="${signedClass(m.momentum24h)}">${showPct(m.momentum24h)}</td><td>${showPct((m.position24h || 0) * 100)}</td><td>${fmt(m.volumeRatio,2)}x</td><td class="reason">${htmlEscape((s.reasons||[]).slice(0,4).join(' · '))}</td></tr>`;
-  }).join('') : '<tr><td class="sym muted" colspan="15">No signals</td></tr>';
+    const sideCell = (s.side || sideForStrategy(s.strategyKey)) === 'short' ? '<span class="neg" style="font-weight:600">空</span>' : '<span class="pos" style="font-weight:600">多</span>';
+    return `<tr><td class="sym">${symLink(s.symbol)}</td><td><span class="${scoreClass}">${fmt(s.score,0)}</span></td><td class="left">${htmlEscape(strategyName(s))}</td><td>${sideCell}</td><td>${fmt(s.entry,8)}</td><td>${lastPriceCell}</td><td>${deltaCell}</td><td class="neg">${fmt(s.stop,8)}</td><td class="pos">${fmt(s.tp1,8)}</td><td>${showPct(s.trailPct)}</td><td class="${signedClass(m.momentum1h)}">${showPct(m.momentum1h)}</td><td class="${signedClass(m.momentum4h)}">${showPct(m.momentum4h)}</td><td class="${signedClass(m.momentum24h)}">${showPct(m.momentum24h)}</td><td>${showPct((m.position24h || 0) * 100)}</td><td>${fmt(m.volumeRatio,2)}x</td><td class="reason">${htmlEscape((s.reasons||[]).slice(0,4).join(' · '))}</td></tr>`;
+  }).join('') : '<tr><td class="sym muted" colspan="16">No signals</td></tr>';
 
   document.getElementById('backtestSummary').innerHTML = bt ? `Trades ${bt.summary.tradeCount} · Win ${fmt(bt.summary.winRatePct,2)}% · PF ${fmt(bt.summary.profitFactor,2)} · Return ${fmt(bt.summary.netReturnPct,2)}% · Max DD ${fmt(bt.summary.maxDrawdownPct,2)}% · ${tw(bt.runAt)}` : 'No run yet';
   document.getElementById('backtestBody').innerHTML = bt && bt.trades.length ? bt.trades.slice(-80).reverse().map(t => `<tr><td class="sym">${symLink(t.symbol)}</td><td class="${signedClass(t.rMultiple)}">${fmt(t.rMultiple,2)}</td><td class="${signedClass(t.pnl)}">${fmt(t.pnl,2)}</td><td>${fmt(t.entry,8)}</td><td>${fmt(t.exit,8)}</td><td class="pos">${showPct(t.mfePct)}</td><td class="neg">${showPct(t.maePct)}</td><td>${fmt(t.score,0)}</td><td class="left">${htmlEscape(t.reason)}</td></tr>`).join('') : '<tr><td class="sym muted" colspan="9">No backtest trades</td></tr>';
