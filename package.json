@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "verify": "node scripts/verify.mjs",
     "dev": "npm run build && npx wrangler pages dev dist",
     "deploy": "npm run build && npx wrangler pages deploy dist --project-name momentum-trader-claude",
     "worker:deploy": "npx wrangler deploy --config worker/wrangler.toml",
