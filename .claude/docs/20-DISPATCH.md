@@ -12,6 +12,7 @@
   - `general-purpose` / `claude`：全工具，可改檔、上網。
   - `claude-code-guide`：查 Claude Code / API 本身的問題（如「frontmatter 支不支援某欄位」）。
   - 本 repo 自訂（`.claude/agents/`）：`acceptor`（sonnet，fresh-context 驗收）、`second-opinion`（opus，高風險方案審查）。
+    **Fallback**：若這兩個 agent 類型在你的環境不可用，改派 `general-purpose`（model 分別用 sonnet / opus），並把對應 `.claude/agents/*.md` 的內文整段貼進派工 prompt。
 - **effort 參數**：本環境的 Agent 工具**沒有** effort 參數；effort 只能由 agent 定義檔控制，而 frontmatter 是否支援 effort 欄位未經查證。需要時派 `claude-code-guide` 查，**不要自己發明欄位名**。
 - 內建 skill：交 PR 前可用 `/code-review`；動到安全敏感面用 `/security-review`。
 
@@ -26,7 +27,7 @@
 | 查網頁 / 外部文件 | 任何需要 WebSearch/WebFetch 的研究 | `general-purpose` + `model: sonnet` |
 | 批次機械改檔 | 同一模式要套 >3 處/檔 | `general-purpose` + `model: haiku`（附已驗證的範例 diff） |
 | 出實作計畫 | 改動跨兩檔以上或有架構取捨 | `Plan` |
-| 驗收 | 任何非 trivial 改動完成後 | `acceptor` |
+| 驗收 | 任何非 trivial 改動完成後（判準見 CLAUDE.md 開頭定義） | `acceptor` |
 | 高風險方案 | 見 §5 | `second-opinion` |
 
 反例（不要派）：改一行、讀一個已知位置的函式、跑一個指令——直接做，派工的開銷比省下的還多。
@@ -44,7 +45,7 @@
 ## 3. 回報合約
 
 - subagent 只回：結論、逐條驗收結果、`檔案:行號` 引用。
-- 長產物（報告、大 diff、掃描清單）**落檔**到 `/tmp/claude-0/...scratchpad/`（暫用）或 `.claude/docs/`（要留的），回報只傳路徑 + 三行摘要。
+- 長產物（報告、大 diff、掃描清單）**落檔**：暫用的寫到你 system prompt 裡列出的 scratchpad 目錄，要留的寫到 `.claude/docs/`，回報只傳路徑 + 三行摘要。
 - 禁止 subagent 把整段檔案內容貼回主對話。派工 prompt 裡要明寫這條。
 - subagent 的回報使用者看不到；重要結論要由主對話用自己的話轉述給使用者。
 
@@ -62,7 +63,7 @@
 
 - **檔案落地** → `acceptor` read-back：讀回檔案原文核對，不看主對話的記憶。
 - **程式碼行為** → `acceptor` 實跑：至少 `npm run verify`；有可實跑的入口（如 worker 的 `/tick`、HTML 的 `runBacktest`）就設法實跑或寫一次性 harness 跑該函式。
-- **高風險判斷**（動策略邏輯、動 KV/掃描預算、資料格式遷移、任何不可逆操作）→ 動手**前**派 `second-opinion`；若問題是「多解擇優」型（例如兩種修法選一），可平行派兩個 subagent 各出一案，再派第三個唯讀 agent 評審選優。
+- **高風險判斷** → 動手**前**派 `second-opinion`。觸發判準：改策略**邏輯結構**（條件、時序、流程）、增減 tick 的 KV write／外部 fetch 次數、state 資料格式遷移、任何不可逆操作。**不觸發**：使用者已明確指定數值的純參數改動（如「TP1 改 +18%」）——那只需雙實作檢查＋`acceptor`，不必先問 opus；若問題是「多解擇優」型（例如兩種修法選一），可平行派兩個 subagent 各出一案，再派第三個唯讀 agent 評審選優。
 - 驗收 FAIL → 回到執行者修，修完**再驗一次**；不可由執行者口頭聲明「已修好」結案。
 
 ## 6. 誠實條款（調度的極限）

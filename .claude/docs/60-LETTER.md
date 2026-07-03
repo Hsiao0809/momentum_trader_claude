@@ -13,7 +13,7 @@ Worker 每 5 分鐘在線上真實運行，但這個沙箱環境**沒有 Cloudfl
 ### 2. KV 裡的 state 是唯一的交易歷史，把它當生產資料庫對待
 
 紙上交易的所有紀錄（開倉、平倉、統計）只存在 Cloudflare KV 的一份 JSON 裡，沒有備份機制。因此：
-- 改 state 結構（新增/改名欄位）＝資料遷移：`normalizeState`（兩檔都有）必須能吃舊格式，否則部署當下歷史就毀了。改結構前先派 `second-opinion`。
+- 改 state 結構（新增/改名欄位）＝資料遷移：worker 的 `normalizeState` 必須能吃舊格式，否則部署當下歷史就毀了（HTML 端**沒有** normalizeState，它經由 `applyServerState` 吃 worker 回傳的 state，相容性要另行確認）。改結構前先派 `second-opinion`。
 - 永遠不要動 `STATE_KEY` 的值；永遠不要在未經使用者確認下呼叫線上 `/reset`。
 - 幫使用者做任何「清理」前，先建議他 `curl .../state > backup.json` 留底。
 
@@ -36,4 +36,4 @@ Worker 每 5 分鐘在線上真實運行，但這個沙箱環境**沒有 Cloudfl
 
 ## 交接：本 session 未完成事項
 
-無。交付清單 A–G 全部落檔，收尾（對抗審查、read-back、push、PR）已執行。若你讀到這行，制度已完整，直接照 CLAUDE.md 的最小流程工作即可。
+無。交付清單 A–G 全部落檔；fresh-context 對抗審查（Fable 等級）找出 7 項必修＋8 項建議修，**全部已修正**（含：TP1 常數錨點錯誤、優先序三處打架、非 trivial 無判準、verify.mjs 的 script regex 缺口）。若你讀到這行，制度已完整且經過一輪對抗驗證，直接照 CLAUDE.md 的最小流程工作即可。

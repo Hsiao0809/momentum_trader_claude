@@ -23,7 +23,10 @@ step('worker syntax (node --check)', () => {
 });
 
 const html = await readFile('momentum_trader_claude.html', 'utf8');
-const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+// Match <script> tags with or without attributes; skip external (src=) scripts.
+const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
+  .filter((m) => !/\bsrc\s*=/i.test(m[1]))
+  .map((m) => m[2]);
 if (scripts.length === 0) {
   failed = true;
   console.error('FAIL dashboard inline script: no <script> block found in momentum_trader_claude.html');

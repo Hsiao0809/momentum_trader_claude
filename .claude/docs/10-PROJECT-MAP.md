@@ -35,6 +35,7 @@
 
 判斷準則：
 - **策略規則本身**（進出場條件、停損停利、分批比例、風險參數）→ 幾乎一定要兩邊都改，讓 dashboard 顯示與 runner 行為一致。
+- ⚠️ **風險常數多空鏡像**：`buildRisk` 對多、空各回傳一組鏡像常數（多單 `tp1:entry*1.20` ↔ 空單 `tp1:entry*0.80`，be/lock/trail 同理）。改任何一個百分比＝改「兩檔 × 多空」**四處**，只改多單那邊是最常見的無聲分岔。
 - **資料抓取、掃描預算、KV/Queue、通知** → 通常只在 worker。
 - **畫面、圖表、PnL 分析頁** → 只在 HTML。
 
@@ -71,7 +72,8 @@
 
 ## 硬性外部約束（違反＝無聲翻車，數字以 README 為準）
 
-1. **KV 寫入預算**：free plan。cron 每天 288 次、每次約 2 writes（lock+state）≈ 576/日，只剩約 424/日給手動操作。→ 不要在 tick 路徑新增 KV write；要加就先算預算並在回覆中寫出來。
+1. **KV 寫入預算**：free plan。cron 每天 288 次、每次約 2 writes（lock+state；有新開倉通知時另 +1 次 NOTIFICATION_STATUS_KEY）≈ 576/日，只剩約 424/日給手動操作。→ 預設不在 tick 路徑新增 KV write；使用者要求的功能必須加時，先算出「每日 +N writes」寫進回覆並取得使用者同意。
+   **「動到 tick/掃描/KV 路徑」的機械判準**：你的 diff 是否改變了每次 tick 的外部 fetch 次數或 KV write 次數？是 → 逐條核對本節；否（純計算邏輯、UI、文案）→ 不需。
 2. **掃描預算**：每次掃描 K-line ≤ 28 次。→ 不要加不設上限的迴圈 fetch。
 3. **Subrequest 上限**：通知走 Queue 就是為了避開掃描路徑的 subrequest 限制。→ 不要把通知改回掃描時同步直發。
 4. **Worker 端禁用 Binance**（403）。瀏覽器端才能用 Binance。

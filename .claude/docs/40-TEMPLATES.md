@@ -33,7 +33,7 @@ momentum_trader_claude.html 與 worker/src/index.js 禁止無 offset 整檔 Read
 相關位置：【檔案:大約位置或函式名】。
 邊界：只改【範圍】；不動【明確排除項，例：策略參數、部署設定】。
 驗收條件（逐條可機械判定）：
-- 【例：兩檔的 takeTP1 中 0.20 皆已改為 0.18，grep 可證】
+- 【例：兩檔 buildRisk 的 TP1 常數共四處皆已改（多單 1.20→1.18、空單鏡像 0.80→0.82；HTML 寫法 `tp1:entry*1.20`、worker 寫法 `tp1: entry * 1.20`），grep 可證】
 - npm run verify 通過（貼輸出末三行）。
 - 若動到 tick/掃描/KV 路徑：寫出每次 tick 的 KV write 次數與外部 fetch 次數變化（+N/-N/不變）。
 回報格式：結論一句 → 逐條驗收自查結果 → 改動點清單（檔案:行號）→ 你做的假設（沒有寫「無」）。
