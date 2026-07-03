@@ -293,6 +293,8 @@
         <select id="tradeStrategyFilter" class="trade-filter" aria-label="依策略篩選交易" title="依策略篩選" onchange="paintAll()">
           <option value="">全部策略</option>
           <option value="pullback_uptrend">上升趨勢回檔</option>
+          <option value="volume_breakout_follow">放量突破跟進</option>
+          <option value="impulse_pullback_reclaim">急拉回檔確認</option>
           <option value="rally_downtrend">下降趨勢反彈</option>
           <option value="strong_momentum_breakout">強動量突破追價</option>
           <option value="volume_ignition">放量啟動追隨</option>
@@ -396,6 +398,8 @@ const BROWSER_NOTIFY_SEEN_KEY = 'momentumLastBrowserNotificationId';
 const TZ = 'Asia/Taipei';
 const LABELS = {
   pullback_uptrend: '上升趨勢回檔',
+  volume_breakout_follow: '放量突破跟進',
+  impulse_pullback_reclaim: '急拉回檔確認',
   rally_downtrend: '下降趨勢反彈',
   strong_momentum_breakout: '強動量突破追價',
   volume_ignition: '放量啟動追隨',
@@ -404,6 +408,8 @@ const LABELS = {
 };
 const STRATEGY_SIDES = {
   pullback_uptrend: 'long',
+  volume_breakout_follow: 'long',
+  impulse_pullback_reclaim: 'long',
   rally_downtrend: 'short',
   strong_momentum_breakout: 'long',
   volume_ignition: 'long',
@@ -921,6 +927,80 @@ function btcRiskOff(rows){
   const fourH = pct(kClose(c[c.length-17]), last) || 0;
   return oneH <= -1.5 && fourH <= -3;
 }
+function classifyMarketContext(rows, atrValue) {
+  const lastIndex = rows.length - 1;
+  const firstIndex = Math.max(8, lastIndex - 48);
+  let impulse = null;
+
+  for (let i = firstIndex; i <= lastIndex; i++) {
+    const priorVolumes = rows.slice(i - 8, i).map(kVol);
+    const baseVolume = median(priorVolumes);
+    const open = kOpen(rows[i]);
+    const high = kHigh(rows[i]);
+    const low = kLow(rows[i]);
+    const close = kClose(rows[i]);
+    const gainPct = pct(open, close) || 0;
+    const rangePct = pct(open, high) || 0;
+    const volumeRatio = safeDiv(kVol(rows[i]), baseVolume, 0);
+    const closeLocation = safeDiv(close - low, high - low, 0.5);
+    const minImpulseRange = Math.max(5, atrValue * 1.5);
+
+    if (gainPct >= 4 && rangePct >= minImpulseRange && volumeRatio >= 5 && closeLocation >= 0.50) {
+      impulse = { index: i, gainPct, volumeRatio, closeLocation, low };
+    }
+  }
+
+  if (!impulse) {
+    return {
+      marketType: 'normal_trend',
+      hasRecentImpulse: false,
+      isImpulseFollow: false,
+      isConfirmedPullback: false,
+      barsSinceImpulse: null,
+      impulseGainPct: null,
+      impulseVolumeRatio: null,
+      impulseCloseLocation: null,
+      impulseLow: null,
+      retracePct: null,
+    };
+  }
+
+  const barsSinceImpulse = lastIndex - impulse.index;
+  const baseStart = Math.max(0, impulse.index - 8);
+  const impulseBase = Math.min(...rows.slice(baseStart, impulse.index + 1).map(kLow));
+  const impulseHigh = Math.max(...rows.slice(impulse.index).map(kHigh));
+  const currentClose = kClose(rows[lastIndex]);
+  const impulseRange = impulseHigh - impulseBase;
+  const retracePct = clamp(safeDiv(impulseHigh - currentClose, impulseRange, 0) * 100, 0, 100);
+  const previousBar = rows[lastIndex - 1];
+  const lastBar = rows[lastIndex];
+  const bullishHigherLow = barsSinceImpulse > 0
+    && kClose(lastBar) > kOpen(lastBar)
+    && kLow(lastBar) > kLow(previousBar)
+    && kClose(lastBar) > kClose(previousBar);
+  const isConfirmedPullback = barsSinceImpulse > 0
+    && retracePct >= 35
+    && retracePct <= 60
+    && bullishHigherLow;
+
+  let marketType = 'pump_exhaustion';
+  if (barsSinceImpulse === 0) marketType = 'volume_impulse';
+  else if (retracePct < 35) marketType = 'high_range_consolidation';
+  else if (retracePct <= 60) marketType = isConfirmedPullback ? 'confirmed_pump_pullback' : 'pump_pullback_wait';
+
+  return {
+    marketType,
+    hasRecentImpulse: true,
+    isImpulseFollow: barsSinceImpulse === 0,
+    isConfirmedPullback,
+    barsSinceImpulse,
+    impulseGainPct: impulse.gainPct,
+    impulseVolumeRatio: impulse.volumeRatio,
+    impulseCloseLocation: impulse.closeLocation,
+    impulseLow: impulse.low,
+    retracePct,
+  };
+}
 function buildRisk(entry, atrValue, side='long', structStop=null){
   const atrStopPct = Math.max(3, Math.min(8, 1.2 * atrValue));
   const trailPct = Math.max(8, 1.5 * atrValue);
@@ -965,6 +1045,7 @@ function stopReasonFor(p){
   return 'stop';
 }
 function strategyKey(m){
+  if(m.isImpulsePullback) return 'impulse_pullback_reclaim';
   if(m.isPullback) return 'pullback_uptrend';
   if((m.momentum4h >= 15 && m.position24h >= 0.80) || (m.momentum24h >= 20 && m.distancePrevHigh >= -2)) return 'strong_momentum_breakout';
   if(m.momentum24h >= 8 && m.position24h >= 0.75 && m.position24h < 0.92 && m.momentum4h >= -3 && m.momentum4h <= 8) return 'high_range_continuation';
@@ -995,19 +1076,65 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
   const aboveEma = price > ema50;
   const emaSlope = pct(ema(c.slice(0, -8).map(kClose), 50), ema50) || 0;
   const lastBar = c[c.length-1];
+  const marketContext = classifyMarketContext(c, atrValue);
   // 結構位：近 6 小時（24 根 15m）擺動高低點
   const swingLow = Math.min(...c.slice(-24).map(kLow));
   const swingHigh = Math.max(...c.slice(-24).map(kHigh));
 
   // ══ 多頭分支：上升趨勢（EMA 上方且斜率為正）══
   if(aboveEma && emaSlope >= 0){
+    if(marketContext.isImpulseFollow){
+      const risk = buildRisk(price, atrValue, 'long', marketContext.impulseLow * 0.995);
+      let score = 82;
+      const reasons = [
+        `24h quote volume ${Math.round(quoteVolume).toLocaleString()} USDT`,
+        `fresh 15m volume impulse: +${marketContext.impulseGainPct.toFixed(2)}%, ${marketContext.impulseVolumeRatio.toFixed(2)}x volume`,
+        'entry window is limited to the next 15m bar',
+      ];
+      if(marketContext.impulseGainPct >= 6) score += 6;
+      if(marketContext.impulseVolumeRatio >= 10) score += 4;
+      if(marketContext.impulseCloseLocation >= 0.70) score += 3;
+      score += 4;
+      reasons.push('above 50-period EMA with positive slope');
+      if(riskOff){
+        score -= 12;
+        reasons.push('BTC context risk-off penalty');
+      }
+      score = Math.round(clamp(score, 0, 100));
+      if(score < minScore) return null;
+
+      const metrics = {
+        momentum1h, momentum4h, momentum24h, position24h, distancePrevHigh, volumeRatio,
+        atrPct:atrValue, stopPct:risk.stopPct, btcRiskOff:riskOff,
+        lastKlineOpenTime:kTime(lastBar), aboveEma, emaSlope,
+        marketType:marketContext.marketType,
+        impulseAgeBars:marketContext.barsSinceImpulse,
+        impulseGainPct:marketContext.impulseGainPct,
+        impulseVolumeRatio:marketContext.impulseVolumeRatio,
+        impulseRetracePct:marketContext.retracePct,
+        isImpulseFollow:true,
+      };
+      return {
+        scannedAt, symbol, score,
+        strategyKey:'volume_breakout_follow',
+        strategyLabel:LABELS.volume_breakout_follow,
+        side:'long', entry:price, stop:risk.stop, tp1:risk.tp1,
+        beTrigger:risk.beTrigger, lockTrigger:risk.lockTrigger,
+        lockLevel:risk.lockLevel, trailPct:risk.trailPct,
+        atrPct:atrValue, quoteVolume, reasons, metrics,
+      };
+    }
+
+    if(marketContext.hasRecentImpulse && !marketContext.isConfirmedPullback) return null;
     if(momentum1h >= 6) return null;
     if(position24h >= 0.95 && momentum1h > 0) return null;
-    if(momentum24h >= 10 && momentum4h < -1) return null;
+    if(momentum24h >= 10 && momentum4h < -1 && !marketContext.isConfirmedPullback) return null;
     // 確認K線：最後一根已收盤 15m 必須收紅，避免接刀
     if(kClose(lastBar) <= kOpen(lastBar)) return null;
 
-    const isPullback = momentum24h >= 5 && momentum4h >= -1 && momentum1h <= 0.5 && momentum1h >= -3 && position24h >= 0.40 && position24h <= 0.85;
+    const isImpulsePullback = marketContext.isConfirmedPullback;
+    const isPullback = isImpulsePullback
+      || (momentum24h >= 5 && momentum4h >= -1 && momentum1h <= 0.5 && momentum1h >= -3 && position24h >= 0.40 && position24h <= 0.85);
     const risk = buildRisk(price, atrValue, 'long', swingLow * 0.995);
     let score = 10;
     const reasons = [`24h quote volume ${Math.round(quoteVolume).toLocaleString()} USDT`];
@@ -1023,11 +1150,25 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
     if(momentum1h <= 18){ score += 10; reasons.push('not a one-candle runaway move'); } else { score -= 15; reasons.push(`1h move ${momentum1h.toFixed(2)}% is overheated`); }
     if(riskOff){ score -= 12; reasons.push('BTC context risk-off penalty'); }
     if(isPullback){ score += 18; reasons.push('healthy pullback in uptrend'); }
+    if(isImpulsePullback){
+      score += 14;
+      reasons.push(`pump retraced ${marketContext.retracePct.toFixed(1)}% and printed a bullish higher-low confirmation`);
+    }
     if(momentum1h >= 4 && position24h >= 0.85){ score -= 14; reasons.push('penalty: chasing the top'); }
     score += 5; reasons.push('above 50-period EMA with positive slope');
     score = Math.round(clamp(score, 0, 100));
     if(score < minScore) return null;
-    const metrics = { momentum1h, momentum4h, momentum24h, position24h, distancePrevHigh, volumeRatio, atrPct:atrValue, stopPct:risk.stopPct, btcRiskOff:riskOff, lastKlineOpenTime:kTime(c[c.length-1]), aboveEma, emaSlope, isPullback };
+    const metrics = {
+      momentum1h, momentum4h, momentum24h, position24h, distancePrevHigh, volumeRatio,
+      atrPct:atrValue, stopPct:risk.stopPct, btcRiskOff:riskOff,
+      lastKlineOpenTime:kTime(c[c.length-1]), aboveEma, emaSlope, isPullback,
+      isImpulsePullback,
+      marketType:marketContext.marketType,
+      impulseAgeBars:marketContext.barsSinceImpulse,
+      impulseGainPct:marketContext.impulseGainPct,
+      impulseVolumeRatio:marketContext.impulseVolumeRatio,
+      impulseRetracePct:marketContext.retracePct,
+    };
     const key = strategyKey(metrics);
     // 追價策略硬性擋單：1h 已衝 4% 以上不追
     if(key === 'strong_momentum_breakout' && momentum1h >= 4) return null;

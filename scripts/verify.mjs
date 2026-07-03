@@ -22,6 +22,10 @@ step('worker syntax (node --check)', () => {
   execFileSync(process.execPath, ['--check', 'worker/src/index.js']);
 });
 
+step('market context behavior and Worker/dashboard parity', () => {
+  execFileSync(process.execPath, ['scripts/verify-market-context.mjs']);
+});
+
 const html = await readFile('momentum_trader_claude.html', 'utf8');
 // Match <script> tags with or without attributes; skip external (src=) scripts.
 const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
