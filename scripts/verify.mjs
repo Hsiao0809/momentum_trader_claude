@@ -1,0 +1,52 @@
+// Static verification gate: `npm run verify`
+// Checks worker syntax, dashboard inline-script syntax, and that the build runs.
+// This catches syntax-level breakage only; logic changes still need the
+// checklists in .claude/docs/30-JUDGMENT.md.
+import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+
+let failed = false;
+const step = (name, fn) => {
+  try {
+    fn();
+    console.log(`ok   ${name}`);
+  } catch (err) {
+    failed = true;
+    console.error(`FAIL ${name}\n${err.stdout?.toString() || ''}${err.stderr?.toString() || err.message}`);
+  }
+};
+
+step('worker syntax (node --check)', () => {
+  execFileSync(process.execPath, ['--check', 'worker/src/index.js']);
+});
+
+const html = await readFile('momentum_trader_claude.html', 'utf8');
+const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+if (scripts.length === 0) {
+  failed = true;
+  console.error('FAIL dashboard inline script: no <script> block found in momentum_trader_claude.html');
+}
+const dir = await mkdtemp(join(tmpdir(), 'verify-'));
+try {
+  for (let i = 0; i < scripts.length; i++) {
+    const file = join(dir, `inline-${i}.js`);
+    await writeFile(file, scripts[i]);
+    step(`dashboard inline script #${i} syntax (node --check)`, () => {
+      execFileSync(process.execPath, ['--check', file]);
+    });
+  }
+} finally {
+  await rm(dir, { recursive: true, force: true });
+}
+
+step('build (scripts/build.mjs)', () => {
+  execFileSync(process.execPath, ['scripts/build.mjs']);
+});
+
+if (failed) {
+  console.error('\nverify FAILED');
+  process.exit(1);
+}
+console.log('\nverify passed');
