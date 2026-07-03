@@ -7,6 +7,7 @@ const INTERVAL_MS = { '15m': 900000 };
 
 const LABELS = {
   pullback_uptrend: '上升趨勢回檔',
+  rally_downtrend: '下降趨勢反彈',
   strong_momentum_breakout: '強動量突破追價',
   volume_ignition: '放量啟動追隨',
   high_range_continuation: '高位續勢承接',
@@ -15,9 +16,10 @@ const LABELS = {
 
 const STRATEGY_SIDES = {
   pullback_uptrend: 'long',
-  strong_momentum_breakout: 'short',
-  volume_ignition: 'short',
-  high_range_continuation: 'short',
+  rally_downtrend: 'short',
+  strong_momentum_breakout: 'long',
+  volume_ignition: 'long',
+  high_range_continuation: 'long',
   narrative_momentum: 'long',
 };
 
@@ -363,13 +365,15 @@ async function openNewPositions(state, env) {
 
   const openSymbols = new Set(state.positions.map((p) => p.symbol));
   const stoppedRecent = new Set((state.trades || [])
-    .filter((t) => t.reason === 'stop' && Date.now() - t.exitTime < cfg.symbolStopCooldownMs)
+    .filter((t) => ['stop', 'be_stop'].includes(t.reason) && Date.now() - t.exitTime < cfg.symbolStopCooldownMs)
     .map((t) => t.symbol));
 
   let totalRisk = state.positions.reduce((sum, p) => sum + Number(p.riskUsdt || 0), 0);
   for (const sig of state.signals) {
     if (state.positions.length >= cfg.maxPositions) break;
     if (openSymbols.has(sig.symbol) || stoppedRecent.has(sig.symbol) || sig.score < cfg.paperMinScore) continue;
+    // 題材動量是剩餘分類，訊號品質最模糊，開倉門檻加嚴
+    if (sig.strategyKey === 'narrative_momentum' && sig.score < cfg.paperMinScore + 8) continue;
 
     const sized = positionSize(state.equity, sig.entry, sig.stop, cfg);
     if (totalRisk + sized.riskUsdt > state.equity * cfg.maxTotalRisk) break;
@@ -615,50 +619,99 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
   const last24h = c.slice(-96);
   const prev24hBars = c.slice(-97, -1);
   const prevHigh = Math.max(...prev24hBars.map(kHigh));
+  const prevLow = Math.min(...prev24hBars.map(kLow));
   const momentum1h = pct(prev1h, price) || 0;
   const momentum4h = pct(prev4h, price) || 0;
   const momentum24h = pct(prev24h, price) || 0;
   const position24h = rangePosition(price, last24h.map(kLow), last24h.map(kHigh));
   const distancePrevHigh = pct(prevHigh, price) || 0;
+  const distancePrevLow = pct(prevLow, price) || 0;
   const volumeRatio = safeDiv(kVol(c[c.length - 1]), median(c.slice(-5, -1).map(kVol)), 0);
   const atrValue = atrPct(c);
   const ema50 = ema(c.map(kClose), 50);
   const aboveEma = price > ema50;
   const emaSlope = pct(ema(c.slice(0, -8).map(kClose), 50), ema50) || 0;
+  const lastBar = c[c.length - 1];
+  // 結構位：近 6 小時（24 根 15m）擺動高低點
+  const swingLow = Math.min(...c.slice(-24).map(kLow));
+  const swingHigh = Math.max(...c.slice(-24).map(kHigh));
 
-  if (momentum1h >= 6) return null;
-  if (position24h >= 0.95 && momentum1h > 0) return null;
-  if (momentum24h >= 10 && momentum4h < -1) return null;
-  if (!aboveEma) return null;
-  if (emaSlope < 0) return null;
+  // ══ 多頭分支：上升趨勢（EMA 上方且斜率為正）══
+  if (aboveEma && emaSlope >= 0) {
+    if (momentum1h >= 6) return null;
+    if (position24h >= 0.95 && momentum1h > 0) return null;
+    if (momentum24h >= 10 && momentum4h < -1) return null;
+    // 確認K線：最後一根已收盤 15m 必須收紅，避免接刀
+    if (kClose(lastBar) <= kOpen(lastBar)) return null;
 
-  const isPullback = momentum24h >= 5 && momentum4h >= -1 && momentum1h <= 0.5 && momentum1h >= -3 && position24h >= 0.40 && position24h <= 0.85;
-  const key = strategyKey({ momentum1h, momentum4h, momentum24h, position24h, distancePrevHigh, volumeRatio, isPullback });
-  const side = sideForStrategy(key);
-  const risk = buildRisk(price, atrValue, side);
-  let score = 10;
-  const reasons = [`24h quote volume ${Math.round(quoteVolume).toLocaleString()} USDT`];
+    const isPullback = momentum24h >= 5 && momentum4h >= -1 && momentum1h <= 0.5 && momentum1h >= -3 && position24h >= 0.40 && position24h <= 0.85;
+    const risk = buildRisk(price, atrValue, 'long', swingLow * 0.995);
+    let score = 10;
+    const reasons = [`24h quote volume ${Math.round(quoteVolume).toLocaleString()} USDT`];
 
-  if (momentum4h >= 4 || momentum24h >= 8) { score += 20; reasons.push(`momentum confirmed: 4h ${momentum4h.toFixed(2)}%, 24h ${momentum24h.toFixed(2)}%`); }
-  if (momentum4h >= 8) { score += 8; reasons.push(`strong 4h momentum ${momentum4h.toFixed(2)}%`); }
-  if (momentum24h >= 15) { score += 8; reasons.push(`strong 24h momentum ${momentum24h.toFixed(2)}%`); }
-  if (momentum1h > 0) { score += 5; reasons.push(`1h still positive ${momentum1h.toFixed(2)}%`); }
-  if (position24h >= 0.75) { score += 20; reasons.push(`price in top ${(position24h * 100).toFixed(1)}% of 24h range`); }
-  if (distancePrevHigh >= -4) { score += 10; reasons.push(`within ${Math.abs(distancePrevHigh).toFixed(2)}% of prior 24h high`); }
-  if (distancePrevHigh > 0) { score += 5; reasons.push('breaking prior 24h high'); }
-  if (volumeRatio >= 1.5) { score += 20; reasons.push(`15m volume expansion ${volumeRatio.toFixed(2)}x`); }
-  if (volumeRatio >= 3) { score += 5; reasons.push('volume expansion is unusually strong'); }
-  if (momentum1h <= 18) { score += 10; reasons.push('not a one-candle runaway move'); } else { score -= 15; reasons.push(`1h move ${momentum1h.toFixed(2)}% is overheated`); }
-  if (riskOff) { score -= 12; reasons.push('BTC context risk-off penalty'); }
-  if (isPullback) { score += 18; reasons.push('healthy pullback in uptrend'); }
-  if (momentum1h >= 4 && position24h >= 0.85) { score -= 14; reasons.push('penalty: chasing the top'); }
-  score += 5;
-  reasons.push('above 50-period EMA with positive slope');
-  score = Math.round(clamp(score, 0, 100));
-  if (score < cfg.minSignalScore) return null;
+    if (momentum4h >= 4 || momentum24h >= 8) { score += 20; reasons.push(`momentum confirmed: 4h ${momentum4h.toFixed(2)}%, 24h ${momentum24h.toFixed(2)}%`); }
+    if (momentum4h >= 8) { score += 8; reasons.push(`strong 4h momentum ${momentum4h.toFixed(2)}%`); }
+    if (momentum24h >= 15) { score += 8; reasons.push(`strong 24h momentum ${momentum24h.toFixed(2)}%`); }
+    if (momentum1h > 0) { score += 5; reasons.push(`1h still positive ${momentum1h.toFixed(2)}%`); }
+    if (position24h >= 0.75) { score += 20; reasons.push(`price in top ${(position24h * 100).toFixed(1)}% of 24h range`); }
+    if (distancePrevHigh >= -4) { score += 10; reasons.push(`within ${Math.abs(distancePrevHigh).toFixed(2)}% of prior 24h high`); }
+    if (distancePrevHigh > 0) { score += 5; reasons.push('breaking prior 24h high'); }
+    if (volumeRatio >= 1.5) { score += 20; reasons.push(`15m volume expansion ${volumeRatio.toFixed(2)}x`); }
+    if (volumeRatio >= 3) { score += 5; reasons.push('volume expansion is unusually strong'); }
+    if (momentum1h <= 18) { score += 10; reasons.push('not a one-candle runaway move'); } else { score -= 15; reasons.push(`1h move ${momentum1h.toFixed(2)}% is overheated`); }
+    if (riskOff) { score -= 12; reasons.push('BTC context risk-off penalty'); }
+    if (isPullback) { score += 18; reasons.push('healthy pullback in uptrend'); }
+    if (momentum1h >= 4 && position24h >= 0.85) { score -= 14; reasons.push('penalty: chasing the top'); }
+    score += 5;
+    reasons.push('above 50-period EMA with positive slope');
+    score = Math.round(clamp(score, 0, 100));
+    if (score < cfg.minSignalScore) return null;
 
-  const metrics = { momentum1h, momentum4h, momentum24h, position24h, distancePrevHigh, volumeRatio, atrPct: atrValue, stopPct: risk.stopPct, btcRiskOff: riskOff, lastKlineOpenTime: kTime(c[c.length - 1]), aboveEma, emaSlope, isPullback };
-  return { scannedAt, symbol, instId, score, strategyKey: key, strategyLabel: LABELS[key], side, entry: price, lastPrice: price, stop: risk.stop, tp1: risk.tp1, beTrigger: risk.beTrigger, lockTrigger: risk.lockTrigger, lockLevel: risk.lockLevel, trailPct: risk.trailPct, atrPct: atrValue, quoteVolume, reasons, metrics };
+    const metrics = { momentum1h, momentum4h, momentum24h, position24h, distancePrevHigh, volumeRatio, atrPct: atrValue, stopPct: risk.stopPct, btcRiskOff: riskOff, lastKlineOpenTime: kTime(c[c.length - 1]), aboveEma, emaSlope, isPullback };
+    const key = strategyKey(metrics);
+    // 追價策略硬性擋單：1h 已衝 4% 以上不追
+    if (key === 'strong_momentum_breakout' && momentum1h >= 4) return null;
+    return { scannedAt, symbol, instId, score, strategyKey: key, strategyLabel: LABELS[key], side: 'long', entry: price, lastPrice: price, stop: risk.stop, tp1: risk.tp1, beTrigger: risk.beTrigger, lockTrigger: risk.lockTrigger, lockLevel: risk.lockLevel, trailPct: risk.trailPct, atrPct: atrValue, quoteVolume, reasons, metrics };
+  }
+
+  // ══ 空頭分支：下降趨勢反彈衰竭（EMA 下方且斜率為負）══
+  if (!aboveEma && emaSlope < 0) {
+    if (momentum1h <= -6) return null;
+    if (position24h <= 0.05 && momentum1h < 0) return null;
+    if (momentum24h <= -10 && momentum4h > 1) return null;
+
+    const isRallyFade = momentum24h <= -5 && momentum4h <= 1 && momentum1h >= -0.5 && momentum1h <= 3 && position24h >= 0.15 && position24h <= 0.60;
+    if (!isRallyFade) return null;
+    // 確認K線：最後一根已收盤 15m 必須收綠，確認反彈開始衰竭
+    if (kClose(lastBar) >= kOpen(lastBar)) return null;
+
+    const risk = buildRisk(price, atrValue, 'short', swingHigh * 1.005);
+    let score = 10;
+    const reasons = [`24h quote volume ${Math.round(quoteVolume).toLocaleString()} USDT`];
+
+    if (momentum4h <= -4 || momentum24h <= -8) { score += 20; reasons.push(`downtrend confirmed: 4h ${momentum4h.toFixed(2)}%, 24h ${momentum24h.toFixed(2)}%`); }
+    if (momentum4h <= -8) { score += 8; reasons.push(`strong 4h downside ${momentum4h.toFixed(2)}%`); }
+    if (momentum24h <= -15) { score += 8; reasons.push(`strong 24h downside ${momentum24h.toFixed(2)}%`); }
+    if (momentum1h < 0) { score += 5; reasons.push(`rally already rolling over: 1h ${momentum1h.toFixed(2)}%`); }
+    if (position24h <= 0.25) { score += 20; reasons.push(`price in bottom ${(position24h * 100).toFixed(1)}% of 24h range`); }
+    if (distancePrevLow <= 4) { score += 10; reasons.push(`within ${Math.abs(distancePrevLow).toFixed(2)}% of prior 24h low`); }
+    if (distancePrevLow < 0) { score += 5; reasons.push('breaking prior 24h low'); }
+    if (volumeRatio >= 1.5) { score += 20; reasons.push(`15m volume expansion ${volumeRatio.toFixed(2)}x`); }
+    if (volumeRatio >= 3) { score += 5; reasons.push('volume expansion is unusually strong'); }
+    if (momentum1h >= -18) { score += 10; reasons.push('not a capitulation candle'); } else { score -= 15; reasons.push(`1h move ${momentum1h.toFixed(2)}% is a capitulation, bounce risk`); }
+    if (riskOff) { score += 8; reasons.push('BTC risk-off supports shorts'); }
+    score += 18;
+    reasons.push('rally exhaustion in downtrend');
+    score += 5;
+    reasons.push('below 50-period EMA with negative slope');
+    score = Math.round(clamp(score, 0, 100));
+    if (score < cfg.minSignalScore) return null;
+
+    const metrics = { momentum1h, momentum4h, momentum24h, position24h, distancePrevHigh, distancePrevLow, volumeRatio, atrPct: atrValue, stopPct: risk.stopPct, btcRiskOff: riskOff, lastKlineOpenTime: kTime(c[c.length - 1]), aboveEma, emaSlope, isRallyFade };
+    return { scannedAt, symbol, instId, score, strategyKey: 'rally_downtrend', strategyLabel: LABELS.rally_downtrend, side: 'short', entry: price, lastPrice: price, stop: risk.stop, tp1: risk.tp1, beTrigger: risk.beTrigger, lockTrigger: risk.lockTrigger, lockLevel: risk.lockLevel, trailPct: risk.trailPct, atrPct: atrValue, quoteVolume, reasons, metrics };
+  }
+
+  return null;
 }
 
 function closePosition(state, p, exit, reason, exitTime) {
@@ -1018,13 +1071,21 @@ async function sendNotificationWithRetry(task) {
   return lastFailure;
 }
 
-function buildRisk(entry, atrValue, side = 'long') {
-  const stopPct = Math.max(3, Math.min(8, 1.2 * atrValue));
+function buildRisk(entry, atrValue, side = 'long', structStop = null) {
+  const atrStopPct = Math.max(3, Math.min(8, 1.2 * atrValue));
   const trailPct = Math.max(8, 1.5 * atrValue);
   if (side === 'short') {
-    return { stop: entry * (1 + stopPct / 100), tp1: entry * 0.80, beTrigger: entry * 0.92, lockTrigger: entry * 0.85, lockLevel: entry * 0.95, trailPct, stopPct };
+    // 結構停損：放在近期擺動高點上方，取較寬者，寬度上限 10%
+    let stop = entry * (1 + atrStopPct / 100);
+    if (structStop && structStop > stop) stop = Math.min(structStop, entry * 1.10);
+    const stopPct = (stop / entry - 1) * 100;
+    return { stop, tp1: entry * 0.85, beTrigger: entry * 0.95, lockTrigger: entry * 0.90, lockLevel: entry * 0.97, trailPct, stopPct };
   }
-  return { stop: entry * (1 - stopPct / 100), tp1: entry * 1.20, beTrigger: entry * 1.08, lockTrigger: entry * 1.15, lockLevel: entry * 1.05, trailPct, stopPct };
+  // 結構停損：放在近期擺動低點下方，取較寬者，寬度上限 10%
+  let stop = entry * (1 - atrStopPct / 100);
+  if (structStop && structStop < stop) stop = Math.max(structStop, entry * 0.90);
+  const stopPct = (1 - stop / entry) * 100;
+  return { stop, tp1: entry * 1.20, beTrigger: entry * 1.08, lockTrigger: entry * 1.15, lockLevel: entry * 1.05, trailPct, stopPct };
 }
 
 function effectiveStopFor(p) {
@@ -1097,7 +1158,7 @@ function strategyKey(m) {
 }
 
 function sideForStrategy(key) {
-  return STRATEGY_SIDES[key] || 'short';
+  return STRATEGY_SIDES[key] || 'long';
 }
 
 function symbolFromInstId(instId) {
@@ -1152,6 +1213,7 @@ function positiveInt(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function kOpen(k) { return Number(k[1]); }
 function kHigh(k) { return Number(k[2]); }
 function kLow(k) { return Number(k[3]); }
 function kClose(k) { return Number(k[4]); }
