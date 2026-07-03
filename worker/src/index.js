@@ -892,15 +892,7 @@ async function sendNotification(env, text, payload = {}) {
   if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
     tasks.push({
       channel: 'telegram',
-      send: () => fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: env.TELEGRAM_CHAT_ID,
-          text,
-          disable_web_page_preview: true,
-        }),
-      }),
+      send: () => sendTelegramNotification(env, text, payload),
     });
   }
 
@@ -935,7 +927,71 @@ async function sendNotification(env, text, payload = {}) {
     sent: tasks.length - failures.length,
     attempts: results.map(({ channel, attempts }) => ({ channel, attempts })),
     failures: failures.map(({ channel, attempts, status, error, body }) => ({ channel, attempts, status, error, body })),
+    warnings: results.filter((result) => result.warning).map(({ channel, warning }) => ({ channel, ...warning })),
   };
+}
+
+async function sendTelegramNotification(env, text, payload) {
+  const sendResponse = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: env.TELEGRAM_CHAT_ID,
+      text,
+      disable_web_page_preview: true,
+    }),
+  });
+  if (!sendResponse.ok || payload.type !== 'new_position') return sendResponse;
+
+  let sentMessage;
+  try {
+    sentMessage = await sendResponse.json();
+  } catch (error) {
+    return { ok: true, warning: { action: 'pin', error: `Telegram send response was not JSON: ${error}` } };
+  }
+
+  const messageId = sentMessage?.result?.message_id;
+  if (!messageId) {
+    return { ok: true, warning: { action: 'pin', error: 'Telegram send response did not include message_id.' } };
+  }
+
+  const pinResult = await pinTelegramMessage(env, messageId);
+  if (!pinResult.ok) {
+    console.warn('telegram pin failed', pinResult);
+    return { ok: true, warning: { action: 'pin', ...pinResult } };
+  }
+  return { ok: true };
+}
+
+async function pinTelegramMessage(env, messageId) {
+  const maxAttempts = 3;
+  let lastFailure = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/pinChatMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: env.TELEGRAM_CHAT_ID,
+          message_id: messageId,
+          disable_notification: true,
+        }),
+      });
+      if (response.ok) return { ok: true, attempts: attempt };
+
+      const body = (await response.text().catch(() => '')).slice(0, 500);
+      lastFailure = { ok: false, attempts: attempt, status: response.status, body };
+      if (response.status < 500 && response.status !== 429) break;
+    } catch (error) {
+      lastFailure = { ok: false, attempts: attempt, error: String(error) };
+      if (lastFailure.error.includes('Too many subrequests')) break;
+    }
+
+    if (attempt < maxAttempts) await sleep(500 * (2 ** (attempt - 1)));
+  }
+
+  return lastFailure || { ok: false, attempts: 0, error: 'Telegram pin failed without a response.' };
 }
 
 async function sendNotificationWithRetry(task) {
@@ -945,7 +1001,7 @@ async function sendNotificationWithRetry(task) {
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       const response = await task.send();
-      if (response.ok) return { ok: true, channel: task.channel, attempts: attempt };
+      if (response.ok) return { ok: true, channel: task.channel, attempts: attempt, warning: response.warning };
 
       const body = (await response.text().catch(() => '')).slice(0, 500);
       lastFailure = { ok: false, channel: task.channel, attempts: attempt, status: response.status, body };

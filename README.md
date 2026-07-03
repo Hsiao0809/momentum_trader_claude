@@ -40,6 +40,8 @@ cmd /c npx wrangler secret put TELEGRAM_BOT_TOKEN --config worker/wrangler.toml
 cmd /c npx wrangler secret put TELEGRAM_CHAT_ID --config worker/wrangler.toml
 ```
 
+New-position messages are automatically pinned after delivery. Private chats can pin directly; in groups and supergroups the bot needs the `can_pin_messages` administrator right, while channels require `can_edit_messages`.
+
 ### Discord
 
 Create a Discord channel webhook, then set:
