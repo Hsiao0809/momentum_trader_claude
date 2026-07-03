@@ -20,6 +20,7 @@ The browser dashboard is only the UI. Continuous paper trading runs in `worker/s
 - Free-plan KV budget: 288 scheduled runs/day, using about 576 writes/day (lock + state), leaving about 424 writes/day for manual actions
 - Market data: OKX USDT perpetual swaps
 - Profit protection: close 50% at +8% and move the remainder to break-even; the existing +15% profit lock and +20% TP1/trailing rules remain active
+- Pump classification: a fresh 15m impulse requires at least +4%, 5x baseline volume, and a strong close. It can only enter on the next bar; the following 12 hours block high-range consolidation entries, and a 35-60% retrace must print a bullish higher low before re-entry.
 - Public API: `https://momentum-trader-claude-runner.siaosiao1016.workers.dev`
 - Signal discovery: anomaly-first scan. Each scan uses a full OKX swap ticker snapshot, then spends K-line requests on abnormal candidates first: strong 24h change, high 24h range position, volume-rank jump, and quote-volume growth. Each scan is capped at 28 K-line requests, with up to 20 anomaly candidates; core high-liquidity symbols are only sampled every 30 minutes.
 
