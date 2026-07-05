@@ -118,5 +118,6 @@ assert.doesNotMatch(
 );
 assert.match(workerSource, /successfulScanCount/);
 assert.match(workerSource, /failedScanCount/);
+assert.match(htmlSource, /掃描失敗 · \$\{state\.lastError\}/);
 
 console.log(`recent signal checks passed (${cases.length} merge cases, Worker/dashboard parity)`);
