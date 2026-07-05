@@ -28,10 +28,23 @@ function loadMerger(source) {
   )(TTL_MS, LIMIT);
 }
 
+function loadSnapshotRanker(source) {
+  const functionSource = extractFunction(source, 'rankedFromTickerSnapshot');
+  return new Function(
+    'TICKER_SNAPSHOT_MAX_AGE_MS',
+    'symbolFromInstId',
+    `return (${functionSource});`,
+  )(
+    TTL_MS,
+    (instId) => instId.replace('-USDT-SWAP', 'USDT').replaceAll('-', ''),
+  );
+}
+
 const workerSource = readFileSync('worker/src/index.js', 'utf8');
 const htmlSource = readFileSync('momentum_trader_claude.html', 'utf8');
 const workerMerge = loadMerger(workerSource);
 const htmlMerge = loadMerger(htmlSource);
+const snapshotRanker = loadSnapshotRanker(workerSource);
 const now = 10_000_000;
 
 const recent = {
@@ -118,6 +131,21 @@ assert.doesNotMatch(
 );
 assert.match(workerSource, /successfulScanCount/);
 assert.match(workerSource, /failedScanCount/);
+assert.match(workerSource, /scanRequestDelayMs: 500/);
+assert.match(workerSource, /universeSource = 'cached'/);
 assert.match(htmlSource, /掃描失敗 · \$\{state\.lastError\}/);
+assert.match(htmlSource, /Universe使用快取/);
 
-console.log(`recent signal checks passed (${cases.length} merge cases, Worker/dashboard parity)`);
+const snapshot = {
+  savedAt: now - 5 * 60 * 1000,
+  items: {
+    'BTC-USDT-SWAP': { rank: 1, last: 62000, change24h: 2, range24hPosition: 0.8, quoteVolumeFloat: 100000000 },
+    'LOW-USDT-SWAP': { rank: 2, last: 1, change24h: 1, range24hPosition: 0.5, quoteVolumeFloat: 1000 },
+  },
+};
+const cachedRanked = snapshotRanker(snapshot, { minQuoteVolume: 20000000 }, now);
+assert.equal(cachedRanked.length, 1);
+assert.equal(cachedRanked[0].symbol, 'BTCUSDT');
+assert.deepEqual(snapshotRanker({ ...snapshot, savedAt: now - TTL_MS - 1 }, { minQuoteVolume: 20000000 }, now), []);
+
+console.log(`recent signal checks passed (${cases.length} merge cases, cached-universe fallback, Worker/dashboard parity)`);
