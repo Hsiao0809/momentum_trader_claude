@@ -23,6 +23,7 @@ The browser dashboard is only the UI. Continuous paper trading runs in `worker/s
 - Pump classification: a fresh 15m impulse requires at least +4%, 5x baseline volume, and a strong close. It can only enter on the next bar; the following 12 hours block high-range consolidation entries, and a 35-60% retrace must print a bullish higher low before re-entry.
 - Public API: `https://momentum-trader-claude-runner.siaosiao1016.workers.dev`
 - Signal discovery: anomaly-first scan. Each scan uses a full OKX swap ticker snapshot, then spends K-line requests on abnormal candidates first: strong 24h change, high 24h range position, volume-rank jump, and quote-volume growth. Each scan is capped at 28 K-line requests, with up to 20 anomaly candidates; core high-liquidity symbols are only sampled every 30 minutes.
+- Candidate display: paper entries use only the current scan, while the dashboard retains the latest signal per symbol for 30 minutes (maximum 50) and reports successful/failed K-line evaluations. This keeps the table readable without allowing stale signals to open positions.
 
 Binance Futures works from the browser, but Binance blocks Cloudflare Workers/Pages Functions from fetching the Futures API with a `403`, so the always-on runner uses OKX public swap market data instead.
 
