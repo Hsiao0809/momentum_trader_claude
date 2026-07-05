@@ -2047,7 +2047,10 @@ function paintAll(){
     const hasHealth = Number.isFinite(Number(meta.successfulScanCount)) && Number.isFinite(Number(meta.failedScanCount));
     const health = hasHealth ? ` · K線 ${meta.successfulScanCount}/${meta.scannedCount || 0} · 失敗 ${meta.failedScanCount}` : '';
     const btcHealth = meta.btcContextOk === false ? ' · BTC資料失敗' : '';
-    signalSummary.textContent = `本輪 ${currentSignals.length} · 近30分 ${candidateSignals.length}${health}${btcHealth} · 掃描 ${state.lastScanAt ? tw(state.lastScanAt) : '尚未'}`;
+    signalSummary.textContent = state.lastError
+      ? `掃描失敗 · ${state.lastError} · 上次成功 ${state.lastScanAt ? tw(state.lastScanAt) : '尚未'}`
+      : `本輪 ${currentSignals.length} · 近30分 ${candidateSignals.length}${health}${btcHealth} · 掃描 ${state.lastScanAt ? tw(state.lastScanAt) : '尚未'}`;
+    signalSummary.style.color = state.lastError ? 'var(--red)' : '';
   }
   const priceStatus = document.getElementById('priceStatus');
   if(priceStatus) priceStatus.textContent = latestPriceAt ? `最新價格：${twFull(latestPriceAt)}` : '最新價格：尚未更新';
