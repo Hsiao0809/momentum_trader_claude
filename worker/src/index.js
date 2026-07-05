@@ -6,6 +6,7 @@ const OKX_API = 'https://www.okx.com';
 const INTERVAL_MS = { '15m': 900000 };
 const RECENT_SIGNAL_TTL_MS = 30 * 60 * 1000;
 const RECENT_SIGNAL_LIMIT = 50;
+const TICKER_SNAPSHOT_MAX_AGE_MS = 30 * 60 * 1000;
 
 const LABELS = {
   pullback_uptrend: '上升趨勢回檔',
@@ -48,7 +49,7 @@ const DEFAULT_CFG = {
   extendedScanStart: 35,
   extendedScanEnd: 160,
   extendedScanBatch: 8,
-  scanRequestDelayMs: 120,
+  scanRequestDelayMs: 500,
   scanStaleMs: 5 * 60 * 1000,
 };
 
@@ -401,7 +402,7 @@ async function scanSignals(state) {
       if (failedSymbols.length < 8) failedSymbols.push(ticker.symbol);
       console.warn('scan failed', ticker.instId, error);
     }
-    await sleep(positiveInt(cfg.scanRequestDelayMs, 120));
+    await sleep(positiveInt(cfg.scanRequestDelayMs, DEFAULT_CFG.scanRequestDelayMs));
   }
 
   state.scanCursor = meta.nextCursor;
@@ -544,7 +545,17 @@ async function scanUniverse(state) {
   const extendedStart = positiveInt(cfg.extendedScanStart, 35);
   const extendedEnd = Math.max(extendedStart, positiveInt(cfg.extendedScanEnd, 120));
   const extendedBatch = Math.max(0, positiveInt(cfg.extendedScanBatch, 8));
-  const ranked = await rankedInstruments(cfg);
+  let universeSource = 'live';
+  let universeError = null;
+  let ranked;
+  try {
+    ranked = await rankedInstruments(cfg);
+  } catch (error) {
+    ranked = rankedFromTickerSnapshot(state.tickerSnapshot, cfg);
+    if (!ranked.length) throw error;
+    universeSource = 'cached';
+    universeError = error.message || String(error);
+  }
   const previousSnapshot = state.tickerSnapshot?.items || {};
   const scored = ranked.map((ticker) => ({
     ...ticker,
@@ -570,12 +581,15 @@ async function scanUniverse(state) {
     .slice(0, maxKlineScans);
 
   if (coreDue && deduped.some((ticker) => ticker.universeTier === 'core')) state.lastCoreScanAt = now;
-  state.tickerSnapshot = buildTickerSnapshot(ranked);
+  if (universeSource === 'live') state.tickerSnapshot = buildTickerSnapshot(ranked);
 
   return {
     tickers: deduped,
     meta: {
       mode: 'anomaly-first',
+      universeSource,
+      universeError,
+      universeSnapshotAgeMs: universeSource === 'cached' ? Date.now() - Number(state.tickerSnapshot?.savedAt || 0) : 0,
       maxKlineScans,
       anomalyLimit,
       anomalyCandidates: anomaly.length,
@@ -1392,6 +1406,23 @@ function buildTickerSnapshot(ranked) {
     };
   }
   return { savedAt: Date.now(), items };
+}
+
+function rankedFromTickerSnapshot(snapshot, cfg, now = Date.now()) {
+  const savedAt = Number(snapshot?.savedAt || 0);
+  if (!savedAt || now - savedAt > TICKER_SNAPSHOT_MAX_AGE_MS || !snapshot?.items) return [];
+  return Object.entries(snapshot.items)
+    .map(([instId, ticker]) => ({
+      instId,
+      symbol: symbolFromInstId(instId),
+      last: Number(ticker.last || 0),
+      change24h: Number(ticker.change24h || 0),
+      range24hPosition: Number(ticker.range24hPosition ?? 0.5),
+      quoteVolumeFloat: Number(ticker.quoteVolumeFloat || 0),
+      rank: Number(ticker.rank || 0),
+    }))
+    .filter((ticker) => ticker.instId.endsWith('-USDT-SWAP') && ticker.quoteVolumeFloat >= cfg.minQuoteVolume)
+    .sort((a, b) => a.rank - b.rank || b.quoteVolumeFloat - a.quoteVolumeFloat);
 }
 
 function rotatingSlice(items, cursor, size) {
