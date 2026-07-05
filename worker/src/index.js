@@ -4,6 +4,8 @@ const NOTIFICATION_STATUS_KEY = 'notification-status-v1';
 const NOTIFICATION_DLQ = 'momentum-trader-notifications-dlq';
 const OKX_API = 'https://www.okx.com';
 const INTERVAL_MS = { '15m': 900000 };
+const RECENT_SIGNAL_TTL_MS = 30 * 60 * 1000;
+const RECENT_SIGNAL_LIMIT = 50;
 
 const LABELS = {
   pullback_uptrend: '上升趨勢回檔',
@@ -204,8 +206,10 @@ async function runPaperTick(env, options = {}) {
     await updatePositions(state, { markToMarket: !willScan });
 
     if (willScan) {
-      state.signals = await scanSignals(state);
+      const currentSignals = await scanSignals(state);
       state.lastScanAt = Date.now();
+      state.signals = currentSignals;
+      state.recentSignals = mergeRecentSignals(state.recentSignals, currentSignals, state.lastScanAt);
     }
 
     if (state.running && !options.onlyScan) {
@@ -264,6 +268,7 @@ function defaultState() {
     pausedUntil: 0,
     consecutiveLosses: 0,
     signals: [],
+    recentSignals: [],
     positions: [],
     trades: [],
     equityCurve: [],
@@ -298,6 +303,7 @@ function normalizeState(state) {
     equity: Number(state.equity ?? cfg.initialEquity),
     peakEquity: Number(state.peakEquity ?? state.equity ?? cfg.initialEquity),
     signals: Array.isArray(state.signals) ? state.signals : [],
+    recentSignals: Array.isArray(state.recentSignals) ? state.recentSignals : [],
     positions: Array.isArray(state.positions) ? state.positions : [],
     trades: Array.isArray(state.trades) ? state.trades : [],
     equityCurve: Array.isArray(state.equityCurve) ? state.equityCurve : [],
@@ -305,6 +311,7 @@ function normalizeState(state) {
     pendingNotifications: Array.isArray(state.pendingNotifications) ? state.pendingNotifications.slice(0, 20) : [],
   };
   normalizeStrategyLabels(normalized.signals);
+  normalizeStrategyLabels(normalized.recentSignals);
   normalizeStrategyLabels(normalized.positions);
   normalizeStrategyLabels(normalized.trades);
   return normalized;
@@ -316,6 +323,37 @@ function normalizeStrategyLabels(items) {
       item.strategyLabel = LABELS[item.strategyKey];
     }
   }
+}
+
+function mergeRecentSignals(previousSignals, currentSignals, now = Date.now()) {
+  const cutoff = now - RECENT_SIGNAL_TTL_MS;
+  const bySymbol = new Map();
+
+  for (const signal of Array.isArray(previousSignals) ? previousSignals : []) {
+    if (!signal?.symbol) continue;
+    const lastSeenAt = Number(signal.lastSeenAt || signal.scannedAt || 0);
+    if (lastSeenAt < cutoff) continue;
+    bySymbol.set(signal.symbol, {
+      ...signal,
+      firstSeenAt: Number(signal.firstSeenAt || signal.scannedAt || lastSeenAt),
+      lastSeenAt,
+    });
+  }
+
+  for (const signal of Array.isArray(currentSignals) ? currentSignals : []) {
+    if (!signal?.symbol) continue;
+    const previous = bySymbol.get(signal.symbol);
+    bySymbol.set(signal.symbol, {
+      ...previous,
+      ...signal,
+      firstSeenAt: Number(previous?.firstSeenAt || signal.scannedAt || now),
+      lastSeenAt: now,
+    });
+  }
+
+  return [...bySymbol.values()]
+    .sort((a, b) => Number(b.lastSeenAt || 0) - Number(a.lastSeenAt || 0) || Number(b.score || 0) - Number(a.score || 0))
+    .slice(0, RECENT_SIGNAL_LIMIT);
 }
 
 function applyConfig(state, body = {}) {
@@ -339,27 +377,44 @@ async function scanSignals(state) {
   const cfg = state.cfg;
   const { tickers, meta } = await scanUniverse(state);
   let riskOff = false;
+  let btcContextOk = true;
   try {
     const btcRows = await klines('BTC-USDT-SWAP', '15m', 130);
     riskOff = btcRiskOff(btcRows);
   } catch (error) {
+    btcContextOk = false;
     console.warn('BTC risk context failed', error);
   }
   const signals = [];
+  let successfulScanCount = 0;
+  let failedScanCount = 0;
+  const failedSymbols = [];
 
   for (const ticker of tickers) {
     try {
       const rows = await klines(ticker.instId, '15m', 130);
+      successfulScanCount++;
       const sig = evaluateSignal(ticker.symbol, ticker.instId, rows, ticker.quoteVolumeFloat, Date.now(), riskOff, cfg);
       if (sig) signals.push({ ...sig, universeTier: ticker.universeTier, universeRank: ticker.rank });
     } catch (error) {
+      failedScanCount++;
+      if (failedSymbols.length < 8) failedSymbols.push(ticker.symbol);
       console.warn('scan failed', ticker.instId, error);
     }
     await sleep(positiveInt(cfg.scanRequestDelayMs, 120));
   }
 
   state.scanCursor = meta.nextCursor;
-  state.scanMeta = { ...meta, scannedAt: Date.now(), scannedCount: tickers.length, signalCount: signals.length };
+  state.scanMeta = {
+    ...meta,
+    scannedAt: Date.now(),
+    scannedCount: tickers.length,
+    successfulScanCount,
+    failedScanCount,
+    failedSymbols,
+    btcContextOk,
+    signalCount: signals.length,
+  };
   return signals.sort((a, b) => b.score - a.score || b.quoteVolume - a.quoteVolume);
 }
 
@@ -565,7 +620,7 @@ async function tickerPrice(instId) {
 
 async function currentPrices(state) {
   const wanted = new Set(
-    [...(state.signals || []), ...(state.positions || [])]
+    [...(state.signals || []), ...(state.recentSignals || []), ...(state.positions || [])]
       .map((item) => item.instId)
       .filter(Boolean),
   );

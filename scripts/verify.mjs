@@ -26,6 +26,10 @@ step('market context behavior and Worker/dashboard parity', () => {
   execFileSync(process.execPath, ['scripts/verify-market-context.mjs']);
 });
 
+step('recent signal retention and scan health behavior', () => {
+  execFileSync(process.execPath, ['scripts/verify-recent-signals.mjs']);
+});
+
 const html = await readFile('momentum_trader_claude.html', 'utf8');
 // Match <script> tags with or without attributes; skip external (src=) scripts.
 const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]

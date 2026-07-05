@@ -102,6 +102,9 @@
     .pill{display:inline-block;border:1px solid var(--border);border-radius:999px;padding:2px 9px;font-size:11px;background:var(--panel3);font-weight:600;font-variant-numeric:tabular-nums}
     .pill.live{color:var(--accent);border-color:rgba(217,119,87,.45);background:var(--accent-soft)}
     .pill.high{color:var(--green);border-color:rgba(123,174,113,.45);background:rgba(123,174,113,.08)}
+    .signal-recency{display:inline-block;margin-left:5px;color:var(--muted);font-size:9px;font-weight:600;vertical-align:middle}
+    tr.recent-signal td{opacity:.72}
+    tr.recent-signal:hover td{opacity:1}
     .reason{max-width:420px;overflow:hidden;text-overflow:ellipsis;text-align:left;color:var(--muted)}
     a.sym-link{color:inherit;text-decoration:none;border-bottom:1px dashed transparent;transition:color .12s,border-color .12s}
     a.sym-link:hover{color:var(--accent);border-bottom-color:var(--accent)}
@@ -392,6 +395,8 @@ const FAPI = 'https://fapi.binance.com';
 const PAPER_API = 'https://momentum-trader-claude-runner.siaosiao1016.workers.dev';
 const SERVER_MODE = Boolean(PAPER_API);
 const INTERVAL_MS = { '15m': 900000 };
+const RECENT_SIGNAL_TTL_MS = 30 * 60 * 1000;
+const RECENT_SIGNAL_LIMIT = 50;
 const LIVE_REFRESH_MS = 30000;
 const BROWSER_NOTIFY_ENABLED_KEY = 'momentumBrowserNotificationsEnabled';
 const BROWSER_NOTIFY_SEEN_KEY = 'momentumLastBrowserNotificationId';
@@ -489,6 +494,37 @@ function ema(values, period){
   return e;
 }
 
+function mergeRecentSignals(previousSignals, currentSignals, now = Date.now()) {
+  const cutoff = now - RECENT_SIGNAL_TTL_MS;
+  const bySymbol = new Map();
+
+  for (const signal of Array.isArray(previousSignals) ? previousSignals : []) {
+    if (!signal?.symbol) continue;
+    const lastSeenAt = Number(signal.lastSeenAt || signal.scannedAt || 0);
+    if (lastSeenAt < cutoff) continue;
+    bySymbol.set(signal.symbol, {
+      ...signal,
+      firstSeenAt: Number(signal.firstSeenAt || signal.scannedAt || lastSeenAt),
+      lastSeenAt,
+    });
+  }
+
+  for (const signal of Array.isArray(currentSignals) ? currentSignals : []) {
+    if (!signal?.symbol) continue;
+    const previous = bySymbol.get(signal.symbol);
+    bySymbol.set(signal.symbol, {
+      ...previous,
+      ...signal,
+      firstSeenAt: Number(previous?.firstSeenAt || signal.scannedAt || now),
+      lastSeenAt: now,
+    });
+  }
+
+  return [...bySymbol.values()]
+    .sort((a, b) => Number(b.lastSeenAt || 0) - Number(a.lastSeenAt || 0) || Number(b.score || 0) - Number(a.score || 0))
+    .slice(0, RECENT_SIGNAL_LIMIT);
+}
+
 function loadState(){
   const raw = localStorage.getItem('lanaaiMomentumClaude');
   if(raw){
@@ -497,10 +533,14 @@ function loadState(){
       if(typeof s.initialEquity === 'number') CFG.initialEquity = s.initialEquity;
       else s.initialEquity = CFG.initialEquity;
       if(typeof s.riskPerTrade === 'number') CFG.riskPerTrade = s.riskPerTrade;
+      const recentSeed = Array.isArray(s.recentSignals)
+        ? s.recentSignals
+        : (s.signals || []).map(signal => ({ ...signal, lastSeenAt: signal.scannedAt || s.lastScanAt || 0 }));
+      s.recentSignals = mergeRecentSignals(recentSeed, [], nowMs());
       return s;
     } catch {}
   }
-  return { running:false, initialEquity:CFG.initialEquity, equity:CFG.initialEquity, peakEquity:CFG.initialEquity, pausedUntil:0, consecutiveLosses:0, signals:[], positions:[], trades:[], equityCurve:[], backtest:null, lastScanAt:0 };
+  return { running:false, initialEquity:CFG.initialEquity, equity:CFG.initialEquity, peakEquity:CFG.initialEquity, pausedUntil:0, consecutiveLosses:0, signals:[], recentSignals:[], positions:[], trades:[], equityCurve:[], backtest:null, lastScanAt:0 };
 }
 // ── Cloud sync (GitHub Gist) ──────────────────────────────────────────────
 const GIST_API = 'https://api.github.com/gists';
@@ -541,6 +581,7 @@ async function pushToCloud(){
   if(!cfg.token) return;
   const upload = { ...state };
   delete upload.signals;
+  delete upload.recentSignals;
   const content = JSON.stringify(upload);
   try {
     let res, data;
@@ -649,7 +690,7 @@ function applyServerState(nextState){
 }
 
 function applyLatestPrices(){
-  for(const signal of state.signals || []){
+  for(const signal of [...(state.signals || []), ...(state.recentSignals || [])]){
     const price = latestPrices[signal.instId];
     if(price?.last) signal.lastPrice = price.last;
   }
@@ -1251,6 +1292,7 @@ async function scanSignals(){
     signals.sort((a,b) => b.score - a.score || b.quoteVolume - a.quoteVolume);
     state.signals = signals;
     state.lastScanAt = nowMs();
+    state.recentSignals = mergeRecentSignals(state.recentSignals, signals, state.lastScanAt);
     saveState();
     log(`Scan complete · ${signals.length} signals · ${tw(state.lastScanAt)}`);
     return signals;
@@ -1993,10 +2035,20 @@ function paintAll(){
   metric('sPf', fmt(paperStats.count ? paperStats.pf : bt?.summary?.profitFactor || 0, 2));
   metric('sR', `${fmt(paperStats.count ? paperStats.avgR : bt?.summary?.avgR || 0, 2)}R`, signedClass(paperStats.count ? paperStats.avgR : bt?.summary?.avgR || 0));
   metric('sGiveback', showPct(drawdown));
-  metric('sCandidates', String(state.signals.length), state.signals.length ? 'blue' : '');
+  const currentSignals = state.signals || [];
+  const recentSignals = mergeRecentSignals(state.recentSignals, [], nowMs());
+  const candidateSignals = recentSignals.length ? recentSignals : currentSignals;
+  const currentSymbols = new Set(currentSignals.map(signal => signal.symbol));
+  metric('sCandidates', String(candidateSignals.length), candidateSignals.length ? 'blue' : '');
 
   const signalSummary = document.getElementById('signalSummary');
-  if(signalSummary) signalSummary.textContent = `${state.signals.length} candidates · last scan ${state.lastScanAt ? tw(state.lastScanAt) : 'never'}`;
+  if(signalSummary){
+    const meta = state.scanMeta || {};
+    const hasHealth = Number.isFinite(Number(meta.successfulScanCount)) && Number.isFinite(Number(meta.failedScanCount));
+    const health = hasHealth ? ` · K線 ${meta.successfulScanCount}/${meta.scannedCount || 0} · 失敗 ${meta.failedScanCount}` : '';
+    const btcHealth = meta.btcContextOk === false ? ' · BTC資料失敗' : '';
+    signalSummary.textContent = `本輪 ${currentSignals.length} · 近30分 ${candidateSignals.length}${health}${btcHealth} · 掃描 ${state.lastScanAt ? tw(state.lastScanAt) : '尚未'}`;
+  }
   const priceStatus = document.getElementById('priceStatus');
   if(priceStatus) priceStatus.textContent = latestPriceAt ? `最新價格：${twFull(latestPriceAt)}` : '最新價格：尚未更新';
   const notifyStatus = document.getElementById('notifyStatus');
@@ -2018,16 +2070,19 @@ function paintAll(){
         ? 'var(--red)'
         : '';
   }
-  document.getElementById('signalsBody').innerHTML = state.signals.length ? state.signals.map(s => {
+  document.getElementById('signalsBody').innerHTML = candidateSignals.length ? candidateSignals.map(s => {
     const m = s.metrics || {};
     const scoreClass = s.score >= 85 ? 'pill high' : 'pill live';
+    const isCurrent = currentSymbols.has(s.symbol);
+    const ageMinutes = Math.max(1, Math.floor((nowMs() - Number(s.lastSeenAt || s.scannedAt || nowMs())) / 60000));
+    const recency = isCurrent ? '' : `<span class="signal-recency" title="最後出現：${htmlEscape(twFull(s.lastSeenAt || s.scannedAt))}">近期 ${ageMinutes}m</span>`;
     const lastP = s.lastPrice;
     const delta = lastP ? pct(s.entry, lastP) : null;
     const lastPriceCell = lastP ? fmt(lastP,8) : '<span class="muted">—</span>';
     const deltaCell = delta !== null ? `<span class="${signedClass(delta)}">${showPct(delta)}</span>` : '<span class="muted">—</span>';
     const sideCell = (s.side || sideForStrategy(s.strategyKey)) === 'short' ? '<span class="neg" style="font-weight:600">空</span>' : '<span class="pos" style="font-weight:600">多</span>';
-    return `<tr><td class="sym">${symLink(s.symbol)}</td><td><span class="${scoreClass}">${fmt(s.score,0)}</span></td><td class="left">${htmlEscape(strategyName(s))}</td><td>${sideCell}</td><td>${fmt(s.entry,8)}</td><td>${lastPriceCell}</td><td>${deltaCell}</td><td class="neg">${fmt(s.stop,8)}</td><td class="pos">${fmt(s.tp1,8)}</td><td>${showPct(s.trailPct)}</td><td class="${signedClass(m.momentum1h)}">${showPct(m.momentum1h)}</td><td class="${signedClass(m.momentum4h)}">${showPct(m.momentum4h)}</td><td class="${signedClass(m.momentum24h)}">${showPct(m.momentum24h)}</td><td>${showPct((m.position24h || 0) * 100)}</td><td>${fmt(m.volumeRatio,2)}x</td><td class="reason">${htmlEscape((s.reasons||[]).slice(0,4).join(' · '))}</td></tr>`;
-  }).join('') : '<tr><td class="sym muted" colspan="16">No signals</td></tr>';
+    return `<tr class="${isCurrent ? '' : 'recent-signal'}"><td class="sym">${symLink(s.symbol)}${recency}</td><td><span class="${scoreClass}">${fmt(s.score,0)}</span></td><td class="left">${htmlEscape(strategyName(s))}</td><td>${sideCell}</td><td>${fmt(s.entry,8)}</td><td>${lastPriceCell}</td><td>${deltaCell}</td><td class="neg">${fmt(s.stop,8)}</td><td class="pos">${fmt(s.tp1,8)}</td><td>${showPct(s.trailPct)}</td><td class="${signedClass(m.momentum1h)}">${showPct(m.momentum1h)}</td><td class="${signedClass(m.momentum4h)}">${showPct(m.momentum4h)}</td><td class="${signedClass(m.momentum24h)}">${showPct(m.momentum24h)}</td><td>${showPct((m.position24h || 0) * 100)}</td><td>${fmt(m.volumeRatio,2)}x</td><td class="reason">${htmlEscape((s.reasons||[]).slice(0,4).join(' · '))}</td></tr>`;
+  }).join('') : '<tr><td class="sym muted" colspan="16">近 30 分鐘沒有候選訊號</td></tr>';
 
   document.getElementById('backtestSummary').innerHTML = bt ? `Trades ${bt.summary.tradeCount} · Win ${fmt(bt.summary.winRatePct,2)}% · PF ${fmt(bt.summary.profitFactor,2)} · Return ${fmt(bt.summary.netReturnPct,2)}% · Max DD ${fmt(bt.summary.maxDrawdownPct,2)}% · ${tw(bt.runAt)}` : 'No run yet';
   document.getElementById('backtestBody').innerHTML = bt && bt.trades.length ? bt.trades.slice(-80).reverse().map(t => `<tr><td class="sym">${symLink(t.symbol)}</td><td class="${signedClass(t.rMultiple)}">${fmt(t.rMultiple,2)}</td><td class="${signedClass(t.pnl)}">${fmt(t.pnl,2)}</td><td>${fmt(t.entry,8)}</td><td>${fmt(t.exit,8)}</td><td class="pos">${showPct(t.mfePct)}</td><td class="neg">${showPct(t.maePct)}</td><td>${fmt(t.score,0)}</td><td class="left">${htmlEscape(t.reason)}</td></tr>`).join('') : '<tr><td class="sym muted" colspan="9">No backtest trades</td></tr>';
@@ -2118,7 +2173,7 @@ function downloadCsv(name, rows){
   const blob = new Blob(["﻿" + text], {type:'text/csv;charset=utf-8'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); URL.revokeObjectURL(a.href);
 }
-function downloadSignals(){ downloadCsv('signals_latest.csv', state.signals); }
+function downloadSignals(){ downloadCsv('signals_recent_30m.csv', mergeRecentSignals(state.recentSignals, [], nowMs())); }
 function downloadBacktest(){ downloadCsv('backtest_trades.csv', state.backtest ? state.backtest.trades : []); }
 function downloadPaper(){ downloadCsv('paper_trades.csv', state.trades); }
 
