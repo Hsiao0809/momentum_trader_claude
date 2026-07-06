@@ -429,7 +429,7 @@ async function openNewPositions(state, env) {
 
   const openSymbols = new Set(state.positions.map((p) => p.symbol));
   const stoppedRecent = new Set((state.trades || [])
-    .filter((t) => ['stop', 'be_stop'].includes(t.reason) && Date.now() - t.exitTime < cfg.symbolStopCooldownMs)
+    .filter((t) => ['stop', 'be_stop', 'early_stop'].includes(t.reason) && Date.now() - t.exitTime < cfg.symbolStopCooldownMs)
     .map((t) => t.symbol));
 
   let totalRisk = state.positions.reduce((sum, p) => sum + Number(p.riskUsdt || 0), 0);
@@ -461,6 +461,8 @@ async function openNewPositions(state, env) {
       beTrigger: sig.beTrigger,
       lockTrigger: sig.lockTrigger,
       lockLevel: sig.lockLevel,
+      earlyTrigger: sig.earlyTrigger,
+      earlyLevel: sig.earlyLevel,
       bePartialEnabled: true,
       bePartialDone: false,
       tp1Done: false,
@@ -775,8 +777,9 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
     if (kClose(lastBar) <= kOpen(lastBar)) return null;
 
     const isImpulsePullback = marketContext.isConfirmedPullback;
+    // 深度要求：position24h 上限 0.70，排除高位盤整假回檔
     const isPullback = isImpulsePullback
-      || (momentum24h >= 5 && momentum4h >= -1 && momentum1h <= 0.5 && momentum1h >= -3 && position24h >= 0.40 && position24h <= 0.85);
+      || (momentum24h >= 5 && momentum4h >= -1 && momentum1h <= 0.5 && momentum1h >= -3 && position24h >= 0.40 && position24h <= 0.70);
     const risk = buildRisk(price, atrValue, 'long', swingLow * 0.995);
     let score = 10;
     const reasons = [`24h quote volume ${Math.round(quoteVolume).toLocaleString()} USDT`];
@@ -817,7 +820,10 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
     const key = strategyKey(metrics);
     // 追價策略硬性擋單：1h 已衝 4% 以上不追
     if (key === 'strong_momentum_breakout' && momentum1h >= 4) return null;
-    return { scannedAt, symbol, instId, score, strategyKey: key, strategyLabel: LABELS[key], side: 'long', entry: price, lastPrice: price, stop: risk.stop, tp1: risk.tp1, beTrigger: risk.beTrigger, lockTrigger: risk.lockTrigger, lockLevel: risk.lockLevel, trailPct: risk.trailPct, atrPct: atrValue, quoteVolume, reasons, metrics };
+    // 回檔單專屬 +4% 早期保護：浮盈 +4% 後停損拉到 -1%
+    const earlyTrigger = key === 'pullback_uptrend' ? price * 1.04 : undefined;
+    const earlyLevel = key === 'pullback_uptrend' ? price * 0.99 : undefined;
+    return { scannedAt, symbol, instId, score, strategyKey: key, strategyLabel: LABELS[key], side: 'long', entry: price, lastPrice: price, stop: risk.stop, tp1: risk.tp1, beTrigger: risk.beTrigger, lockTrigger: risk.lockTrigger, lockLevel: risk.lockLevel, earlyTrigger, earlyLevel, trailPct: risk.trailPct, atrPct: atrValue, quoteVolume, reasons, metrics };
   }
 
   // ══ 空頭分支：下降趨勢反彈衰竭（EMA 下方且斜率為負）══
@@ -1246,6 +1252,7 @@ function effectiveStopFor(p) {
   if (p.tp1Done) return Math.max(p.lockLevel || p.entry, high * (1 - p.trailPct / 100));
   if (p.lockTrigger && high >= p.lockTrigger) return Math.max(p.stop, p.lockLevel || p.entry);
   if (p.beTrigger && high >= p.beTrigger) return Math.max(p.stop, p.entry);
+  if (p.earlyTrigger && high >= p.earlyTrigger) return Math.max(p.stop, p.earlyLevel || p.entry * 0.99);
   return p.stop;
 }
 
@@ -1260,6 +1267,7 @@ function stopReasonFor(p) {
   const high = p.highest || p.entry;
   if (p.lockTrigger && high >= p.lockTrigger) return 'lock_stop';
   if (p.beTrigger && high >= p.beTrigger) return 'be_stop';
+  if (p.earlyTrigger && high >= p.earlyTrigger) return 'early_stop';
   return 'stop';
 }
 
