@@ -24,8 +24,6 @@
 | `npm run dev` | build + `wrangler pages dev dist`（本地預覽，沙箱內通常不需要） |
 | `npm run deploy` / `worker:deploy` / `deploy:all` | 部署（**需要 Cloudflare 憑證，模型不要主動執行**，交給使用者） |
 | `npm run worker:tail` | 看線上 worker log（需憑證） |
-| `node scripts/fetch-okx-candles.mjs [days] [universe]` | 抓 OKX 真實 K 線到 `scripts/.cache/`（不進 git），供回測用 |
-| `node scripts/backtest-strategies.mjs [--patch OLD NEW]` | 對 `momentum_trader_claude.html` 的真實策略邏輯跑回測；用法見 `.claude/docs/70-STRATEGY-PLAYBOOK.md` |
 
 沒有測試、沒有 linter。邏輯正確性靠 `.claude/docs/30-JUDGMENT.md` 的檢查表與 fresh-context 驗收。
 
