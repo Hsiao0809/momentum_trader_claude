@@ -1070,6 +1070,7 @@ function effectiveStopFor(p){
   if(p.tp1Done) return Math.max(p.lockLevel || p.entry, h * (1 - p.trailPct / 100));
   if(p.lockTrigger && h >= p.lockTrigger) return Math.max(p.stop, p.lockLevel || p.entry);
   if(p.beTrigger  && h >= p.beTrigger)   return Math.max(p.stop, p.entry);
+  if(p.earlyTrigger && h >= p.earlyTrigger) return Math.max(p.stop, p.earlyLevel || p.entry * 0.99);
   return p.stop;
 }
 function stopReasonFor(p){
@@ -1083,6 +1084,7 @@ function stopReasonFor(p){
   const h = p.highest || p.entry;
   if(p.lockTrigger && h >= p.lockTrigger) return 'lock_stop';
   if(p.beTrigger  && h >= p.beTrigger)   return 'be_stop';
+  if(p.earlyTrigger && h >= p.earlyTrigger) return 'early_stop';
   return 'stop';
 }
 function strategyKey(m){
@@ -1174,8 +1176,9 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
     if(kClose(lastBar) <= kOpen(lastBar)) return null;
 
     const isImpulsePullback = marketContext.isConfirmedPullback;
+    // 深度要求：position24h 上限 0.70，排除高位盤整假回檔
     const isPullback = isImpulsePullback
-      || (momentum24h >= 5 && momentum4h >= -1 && momentum1h <= 0.5 && momentum1h >= -3 && position24h >= 0.40 && position24h <= 0.85);
+      || (momentum24h >= 5 && momentum4h >= -1 && momentum1h <= 0.5 && momentum1h >= -3 && position24h >= 0.40 && position24h <= 0.70);
     const risk = buildRisk(price, atrValue, 'long', swingLow * 0.995);
     let score = 10;
     const reasons = [`24h quote volume ${Math.round(quoteVolume).toLocaleString()} USDT`];
@@ -1213,7 +1216,10 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
     const key = strategyKey(metrics);
     // 追價策略硬性擋單：1h 已衝 4% 以上不追
     if(key === 'strong_momentum_breakout' && momentum1h >= 4) return null;
-    return { scannedAt, symbol, score, strategyKey:key, strategyLabel:LABELS[key], side:'long', entry:price, stop:risk.stop, tp1:risk.tp1, beTrigger:risk.beTrigger, lockTrigger:risk.lockTrigger, lockLevel:risk.lockLevel, trailPct:risk.trailPct, atrPct:atrValue, quoteVolume, reasons, metrics };
+    // 回檔單專屬 +4% 早期保護：浮盈 +4% 後停損拉到 -1%
+    const earlyTrigger = key === 'pullback_uptrend' ? price * 1.04 : undefined;
+    const earlyLevel = key === 'pullback_uptrend' ? price * 0.99 : undefined;
+    return { scannedAt, symbol, score, strategyKey:key, strategyLabel:LABELS[key], side:'long', entry:price, stop:risk.stop, tp1:risk.tp1, beTrigger:risk.beTrigger, lockTrigger:risk.lockTrigger, lockLevel:risk.lockLevel, earlyTrigger, earlyLevel, trailPct:risk.trailPct, atrPct:atrValue, quoteVolume, reasons, metrics };
   }
 
   // ══ 空頭分支：下降趨勢反彈衰竭（EMA 下方且斜率為負）══
@@ -1318,6 +1324,9 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
     : Math.min(...preBars.map(kLow)) * 0.995;
   const risk = buildRisk(entry, atrValue, side, structStop);
   const originalStop = risk.stop;
+  // 回檔單專屬 +4% 早期保護
+  const earlyTrigger = strategyKey === 'pullback_uptrend' ? entry * 1.04 : null;
+  const earlyLevel = strategyKey === 'pullback_uptrend' ? entry * 0.99 : null;
   const sized = positionSize(equity, entry, risk.stop);
   let remainingQty = sized.qty, realized = 0, bePartialDone = false, tp1Done = false, stop = risk.stop;
   let highest = entry, lowest = entry, mfe = 0, mae = 0;
@@ -1357,10 +1366,11 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
       }
       const es = tp1Done ? Math.max(risk.lockLevel, highest*(1-risk.trailPct/100))
                : highest >= risk.lockTrigger ? Math.max(stop, risk.lockLevel)
-               : highest >= risk.beTrigger   ? Math.max(stop, entry) : stop;
+               : highest >= risk.beTrigger   ? Math.max(stop, entry)
+               : (earlyTrigger && highest >= earlyTrigger) ? Math.max(stop, earlyLevel) : stop;
       if(low <= es){
         exit=es; exitTime=kTime(bar); realized+=remainingQty*(exit-entry);
-        reason=tp1Done?'trail_stop':highest>=risk.lockTrigger?'lock_stop':highest>=risk.beTrigger?'be_stop':'stop'; break;
+        reason=tp1Done?'trail_stop':highest>=risk.lockTrigger?'lock_stop':highest>=risk.beTrigger?'be_stop':(earlyTrigger&&highest>=earlyTrigger)?'early_stop':'stop'; break;
       }
       if(!tp1Done && high >= risk.tp1){ const sq=remainingQty*0.5; realized+=sq*(risk.tp1-entry); remainingQty-=sq; tp1Done=true; }
       if(i===lastIndex){ exit=close; exitTime=kTime(bar); realized+=remainingQty*(exit-entry); }
@@ -1484,7 +1494,7 @@ async function paperTick(){
   if(!state.signals.length || nowMs() - state.lastScanAt > 3*60*1000) await scanSignals();
   const openSymbols = new Set(state.positions.map(p => p.symbol));
   const stoppedRecent = new Set((state.trades || [])
-    .filter(t => ['stop','be_stop'].includes(t.reason) && nowMs() - t.exitTime < CFG.symbolStopCooldownMs)
+    .filter(t => ['stop','be_stop','early_stop'].includes(t.reason) && nowMs() - t.exitTime < CFG.symbolStopCooldownMs)
     .map(t => t.symbol));
   let totalRisk = state.positions.reduce((a,p)=>a+p.riskUsdt,0);
   for(const sig of state.signals){
@@ -1494,7 +1504,7 @@ async function paperTick(){
     if(sig.strategyKey === 'narrative_momentum' && sig.score < CFG.paperMinScore + 8) continue;
     const sized = positionSize(state.equity, sig.entry, sig.stop);
     if(totalRisk + sized.riskUsdt > state.equity * CFG.maxTotalRisk) break;
-    state.positions.push({ id:`p_${nowMs()}_${sig.symbol}`, symbol:sig.symbol, strategyKey:sig.strategyKey, strategyLabel:sig.strategyLabel, side:sig.side||'long', entryTime:nowMs(), lastTime:nowMs(), entry:sig.entry, last:sig.entry, qty:sized.qty, remainingQty:sized.qty, stop:sig.stop, originalStop:sig.stop, tp1:sig.tp1, beTrigger:sig.beTrigger, lockTrigger:sig.lockTrigger, lockLevel:sig.lockLevel, bePartialEnabled:true, bePartialDone:false, tp1Done:false, trailPct:sig.trailPct, highest:sig.entry, lowest:sig.entry, score:sig.score, riskUsdt:sized.riskUsdt, realizedPnl:0, partialExits:[], reasons:sig.reasons });
+    state.positions.push({ id:`p_${nowMs()}_${sig.symbol}`, symbol:sig.symbol, strategyKey:sig.strategyKey, strategyLabel:sig.strategyLabel, side:sig.side||'long', entryTime:nowMs(), lastTime:nowMs(), entry:sig.entry, last:sig.entry, qty:sized.qty, remainingQty:sized.qty, stop:sig.stop, originalStop:sig.stop, tp1:sig.tp1, beTrigger:sig.beTrigger, lockTrigger:sig.lockTrigger, lockLevel:sig.lockLevel, earlyTrigger:sig.earlyTrigger, earlyLevel:sig.earlyLevel, bePartialEnabled:true, bePartialDone:false, tp1Done:false, trailPct:sig.trailPct, highest:sig.entry, lowest:sig.entry, score:sig.score, riskUsdt:sized.riskUsdt, realizedPnl:0, partialExits:[], reasons:sig.reasons });
     totalRisk += sized.riskUsdt; openSymbols.add(sig.symbol);
   }
   saveState();
@@ -1618,7 +1628,7 @@ async function refreshMarks(){
         const exitReason = stopReasonFor(p);
         if(p.side==='short' ? price>=effectiveStop : price<=effectiveStop){
           closePosition(p, effectiveStop, exitReason, nowMs());
-          const reasonLabel = {stop:'止損',be_stop:'保本出場',lock_stop:'鎖利出場',trail_stop:'移動停利'}[exitReason] || exitReason;
+          const reasonLabel = {stop:'止損',be_stop:'保本出場',early_stop:'早期保護',lock_stop:'鎖利出場',trail_stop:'移動停利'}[exitReason] || exitReason;
           log(`即時出場 · ${p.symbol} @ ${fmt(effectiveStop,8)} (${reasonLabel})`);
           return;
         }
@@ -2145,7 +2155,7 @@ function paintAll(){
   updateStatusLine(state.running ? `Paper running · ${state.positions.length} open · ${tw(nowMs())}` : `Paper stopped · ${tw(nowMs())}`);
   updatePaperAction();
 }
-const REASON_LABELS = { stop:'止損', be_stop:'保本出場', lock_stop:'鎖利出場', trail_stop:'移動停利', tp1:'TP1 出場', time_exit:'到期出場' };
+const REASON_LABELS = { stop:'止損', be_stop:'保本出場', early_stop:'早期保護', lock_stop:'鎖利出場', trail_stop:'移動停利', tp1:'TP1 出場', time_exit:'到期出場' };
 function buildBreakdown(trades, keyFn){
   const map = {};
   trades.forEach(t => {
