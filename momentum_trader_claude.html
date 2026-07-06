@@ -159,6 +159,11 @@
     @media(max-width:900px){html,body{overflow:auto}body{flex-direction:column}main{flex:none;height:auto;min-height:0;grid-template-rows:auto;overflow:visible}.metric-grid{grid-template-columns:repeat(4,1fr)}.cols2{grid-template-columns:1fr!important}.summary{max-width:100%}.trade-log-section .section-head{align-items:flex-start;flex-wrap:wrap}.trade-head-actions{width:100%;justify-content:flex-start;flex-wrap:wrap}.trade-log-section>.table-wrap{max-height:196px}.pnl-section-head{align-items:flex-start;flex-wrap:wrap}.pnl-toolbar{width:100%;justify-content:flex-start}.pnl-summary-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.pnl-stat:nth-child(2){border-right:0}.pnl-stat:nth-child(-n+2){border-bottom:1px solid var(--border)}#pnlSection{min-height:460px}#pnlSection.calendar-mode{min-height:570px}#pnlCanvas{height:220px}.pnl-chart-shell{min-height:220px}.pnl-day{min-height:52px;padding:5px}}
     @media(max-width:520px){.pnl-toolbar{display:grid;grid-template-columns:1fr;gap:6px}.pnl-toolbar .segmented{width:100%}.pnl-toolbar .segmented button{flex:1;padding:0 5px}#pnlSection{min-height:470px}#pnlSection.calendar-mode{min-height:600px}.pnl-day{min-height:48px}.pnl-day-value{font-size:9px}.pnl-month-total{max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
     @media(max-width:900px){.runtime-status{display:grid;grid-template-columns:1fr;gap:3px}.runtime-status .status{max-width:100%}}
+    @media(max-width:520px){
+      .section-head.mobile-summary-stack{display:grid;grid-template-columns:minmax(0,1fr);align-items:start;gap:4px}
+      .section-head.mobile-summary-stack h2{white-space:nowrap}
+      .section-head.mobile-summary-stack .summary{width:100%;max-width:none;white-space:normal;overflow:visible;text-overflow:clip;line-height:1.45}
+    }
     @media(max-width:520px){.drawer-scroll{padding-left:14px;padding-right:14px}.drawer-section{padding:13px 0}}
   </style>
 </head>
@@ -252,7 +257,7 @@
   </div>
 
   <section class="trading-page">
-    <div class="section-head"><h2>Candidate Signals</h2><div id="signalSummary" class="summary">Waiting for scan</div></div>
+    <div class="section-head mobile-summary-stack"><h2>Candidate Signals</h2><div id="signalSummary" class="summary">Waiting for scan</div></div>
     <div class="table-wrap">
       <table>
         <thead><tr>
@@ -265,7 +270,7 @@
 
   <div class="cols2 trading-page">
     <section class="lower-section">
-      <div class="section-head"><h2>Paper Positions</h2><div id="positionSummary" class="summary">No open position</div></div>
+      <div class="section-head mobile-summary-stack"><h2>Paper Positions</h2><div id="positionSummary" class="summary">No open position</div></div>
       <div class="table-wrap">
         <table>
           <thead><tr>
