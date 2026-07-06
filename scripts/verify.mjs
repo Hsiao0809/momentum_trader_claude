@@ -30,6 +30,10 @@ step('recent signal retention and scan health behavior', () => {
   execFileSync(process.execPath, ['scripts/verify-recent-signals.mjs']);
 });
 
+step('OKX and Gate market provider behavior', () => {
+  execFileSync(process.execPath, ['scripts/verify-market-providers.mjs']);
+});
+
 const html = await readFile('momentum_trader_claude.html', 'utf8');
 // Match <script> tags with or without attributes; skip external (src=) scripts.
 const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]

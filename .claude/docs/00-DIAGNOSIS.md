@@ -8,7 +8,7 @@
 **事實**：策略邏輯在兩個檔案各有一份獨立實作，函式同名但內容不完全相同：
 
 - `momentum_trader_claude.html`（瀏覽器端，資料源 **Binance** Futures API）
-- `worker/src/index.js`（Cloudflare Worker 端，資料源 **OKX** swap API——因為 Binance 對 Workers 回 403）
+- `worker/src/index.js`（Cloudflare Worker 端，資料源 **OKX + Gate** swap API——因為 Binance 對 Workers 回 403）
 
 兩邊都有：`evaluateSignal`、`buildRisk`、`effectiveStopFor`、`stopReasonFor`、`closePosition`、`takeBreakEvenPartial`、`takeTP1`、`positionSize`、`atrPct`、`btcRiskOff`、`scanSignals`、`strategyKey`、`sideForStrategy` 等。
 

@@ -3,10 +3,13 @@ const LOCK_KEY = 'paper-lock-v1';
 const NOTIFICATION_STATUS_KEY = 'notification-status-v1';
 const NOTIFICATION_DLQ = 'momentum-trader-notifications-dlq';
 const OKX_API = 'https://www.okx.com';
+const GATE_API = 'https://api.gateio.ws';
 const INTERVAL_MS = { '15m': 900000 };
 const RECENT_SIGNAL_TTL_MS = 30 * 60 * 1000;
 const RECENT_SIGNAL_LIMIT = 50;
 const TICKER_SNAPSHOT_MAX_AGE_MS = 30 * 60 * 1000;
+const GATE_MIN_QUOTE_VOLUME = 5_000_000;
+const GATE_FALLBACK_VOLUME_RATIO = 0.25;
 
 const LABELS = {
   pullback_uptrend: '上升趨勢回檔',
@@ -191,7 +194,7 @@ async function runPaperTick(env, options = {}) {
     const state = await loadState(env);
     state.lastRunAt = now;
     state.lastRunReason = options.reason || 'unknown';
-    state.marketProvider = 'okx-usdt-swap';
+    state.marketProvider = 'okx+gate-usdt-swap';
 
     recoverLastFailedNotification(state);
     if (await flushPendingNotifications(state, env)) {
@@ -283,7 +286,7 @@ function defaultState() {
     tickerSnapshot: null,
     lastRunAt: 0,
     lastError: null,
-    marketProvider: 'okx-usdt-swap',
+    marketProvider: 'okx+gate-usdt-swap',
     cfg: { ...DEFAULT_CFG },
   };
 }
@@ -315,6 +318,10 @@ function normalizeState(state) {
   normalizeStrategyLabels(normalized.recentSignals);
   normalizeStrategyLabels(normalized.positions);
   normalizeStrategyLabels(normalized.trades);
+  normalizeMarketProviders(normalized.signals);
+  normalizeMarketProviders(normalized.recentSignals);
+  normalizeMarketProviders(normalized.positions);
+  normalizeMarketProviders(normalized.trades);
   return normalized;
 }
 
@@ -323,6 +330,12 @@ function normalizeStrategyLabels(items) {
     if (item?.strategyKey && LABELS[item.strategyKey]) {
       item.strategyLabel = LABELS[item.strategyKey];
     }
+  }
+}
+
+function normalizeMarketProviders(items) {
+  for (const item of items) {
+    if (!item?.marketProvider) item.marketProvider = providerFromInstId(item?.instId);
   }
 }
 
@@ -380,7 +393,7 @@ async function scanSignals(state) {
   let riskOff = false;
   let btcContextOk = true;
   try {
-    const btcRows = await klines('BTC-USDT-SWAP', '15m', 130);
+    const btcRows = await marketKlines('okx', 'BTC-USDT-SWAP', '15m', 130);
     riskOff = btcRiskOff(btcRows);
   } catch (error) {
     btcContextOk = false;
@@ -394,10 +407,23 @@ async function scanSignals(state) {
 
   for (const ticker of tickers) {
     try {
-      const rows = await klines(ticker.instId, '15m', 130);
+      const rows = await marketKlines(ticker.marketProvider, ticker.instId, '15m', 130);
       successfulScanCount++;
-      const sig = evaluateSignal(ticker.symbol, ticker.instId, rows, ticker.quoteVolumeFloat, Date.now(), riskOff, cfg);
-      if (sig) signals.push({ ...sig, universeTier: ticker.universeTier, universeRank: ticker.rank });
+      const sig = evaluateSignal(
+        ticker.symbol,
+        ticker.instId,
+        rows,
+        ticker.quoteVolumeFloat,
+        Date.now(),
+        riskOff,
+        { ...cfg, minQuoteVolume: ticker.minQuoteVolume || cfg.minQuoteVolume },
+      );
+      if (sig) signals.push({
+        ...sig,
+        marketProvider: ticker.marketProvider,
+        universeTier: ticker.universeTier,
+        universeRank: ticker.rank,
+      });
     } catch (error) {
       failedScanCount++;
       if (failedSymbols.length < 8) failedSymbols.push(ticker.symbol);
@@ -446,6 +472,7 @@ async function openNewPositions(state, env) {
       id: `p_${Date.now()}_${sig.symbol}`,
       symbol: sig.symbol,
       instId: sig.instId,
+      marketProvider: sig.marketProvider || providerFromInstId(sig.instId),
       strategyKey: sig.strategyKey,
       strategyLabel: sig.strategyLabel,
       side: sig.side || 'long',
@@ -490,7 +517,9 @@ async function updatePositions(state, options = {}) {
   for (const p of state.positions) {
     let closed = false;
     try {
-      const rows = closedKlines(await klines(p.instId || instIdFromSymbol(p.symbol), '15m', 300));
+      const provider = p.marketProvider || providerFromInstId(p.instId);
+      const instId = p.instId || instIdFromSymbol(p.symbol, provider);
+      const rows = closedKlines(await marketKlines(provider, instId, '15m', 300));
       for (const bar of rows) {
         if (kTime(bar) <= p.lastTime) continue;
         p.lastTime = kTime(bar);
@@ -519,7 +548,7 @@ async function updatePositions(state, options = {}) {
       }
 
       if (!closed && markToMarket) {
-        const price = await tickerPrice(p.instId || instIdFromSymbol(p.symbol));
+        const price = await tickerPrice(provider, instId);
         p.last = price;
         p.highest = Math.max(p.highest || p.entry, price);
         p.lowest = Math.min(p.lowest || p.entry, price);
@@ -553,14 +582,19 @@ async function scanUniverse(state) {
   const extendedBatch = Math.max(0, positiveInt(cfg.extendedScanBatch, 8));
   let universeSource = 'live';
   let universeError = null;
+  let providerMeta = {};
   let ranked;
   try {
-    ranked = await rankedInstruments(cfg);
+    const result = await rankedInstruments(cfg);
+    ranked = result.ranked;
+    providerMeta = result.providerMeta;
+    if (providerMeta.okxError || providerMeta.gateError) universeSource = 'live-partial';
   } catch (error) {
     ranked = rankedFromTickerSnapshot(state.tickerSnapshot, cfg);
     if (!ranked.length) throw error;
     universeSource = 'cached';
     universeError = error.message || String(error);
+    providerMeta = state.tickerSnapshot?.providerMeta || {};
   }
   const previousSnapshot = state.tickerSnapshot?.items || {};
   const scored = ranked.map((ticker) => ({
@@ -569,7 +603,7 @@ async function scanUniverse(state) {
   }));
   const anomaly = scored
     .filter((ticker) => ticker.rank > coreLimit || ticker.anomalyScore >= 20)
-    .sort((a, b) => b.anomalyScore - a.anomalyScore || b.quoteVolumeFloat - a.quoteVolumeFloat)
+    .sort((a, b) => b.anomalyScore - a.anomalyScore || b.normalizedQuoteVolume - a.normalizedQuoteVolume)
     .slice(0, anomalyLimit)
     .map((ticker) => ({ ...ticker, universeTier: 'anomaly' }));
 
@@ -587,7 +621,7 @@ async function scanUniverse(state) {
     .slice(0, maxKlineScans);
 
   if (coreDue && deduped.some((ticker) => ticker.universeTier === 'core')) state.lastCoreScanAt = now;
-  if (universeSource === 'live') state.tickerSnapshot = buildTickerSnapshot(ranked);
+  if (universeSource !== 'cached') state.tickerSnapshot = buildTickerSnapshot(ranked, providerMeta);
 
   return {
     tickers: deduped,
@@ -595,6 +629,11 @@ async function scanUniverse(state) {
       mode: 'anomaly-first',
       universeSource,
       universeError,
+      providerMeta: {
+        ...providerMeta,
+        okxScanned: deduped.filter((ticker) => ticker.marketProvider === 'okx').length,
+        gateScanned: deduped.filter((ticker) => ticker.marketProvider === 'gate').length,
+      },
       universeSnapshotAgeMs: universeSource === 'cached' ? Date.now() - Number(state.tickerSnapshot?.savedAt || 0) : 0,
       maxKlineScans,
       anomalyLimit,
@@ -614,56 +653,212 @@ async function scanUniverse(state) {
 }
 
 async function rankedInstruments(cfg) {
-  const tickers = await okx('/api/v5/market/tickers', { instType: 'SWAP' });
-  return tickers
-    .filter((t) => t.instId && t.instId.endsWith('-USDT-SWAP'))
-    .map((t) => {
-      const last = Number(t.last || 0);
-      const open24h = Number(t.open24h || 0);
-      const high24h = Number(t.high24h || 0);
-      const low24h = Number(t.low24h || 0);
-      const baseVolume = Number(t.volCcy24h || 0);
-      const quoteVolumeFloat = last * baseVolume;
-      const change24h = open24h ? (last / open24h - 1) * 100 : 0;
-      const range24hPosition = high24h > low24h ? (last - low24h) / (high24h - low24h) : 0.5;
-      return { instId: t.instId, symbol: symbolFromInstId(t.instId), last, open24h, high24h, low24h, change24h, range24hPosition, quoteVolumeFloat };
-    })
-    .filter((t) => t.quoteVolumeFloat >= cfg.minQuoteVolume)
-    .sort((a, b) => b.quoteVolumeFloat - a.quoteVolumeFloat)
+  const [okxResult, gateResult] = await Promise.allSettled([
+    okx('/api/v5/market/tickers', { instType: 'SWAP' }),
+    gate('/api/v4/futures/usdt/tickers'),
+  ]);
+  if (okxResult.status === 'rejected' && gateResult.status === 'rejected') {
+    throw new Error(`Market universe unavailable: ${okxResult.reason}; ${gateResult.reason}`);
+  }
+
+  const okxAll = okxResult.status === 'fulfilled' ? normalizeOkxTickers(okxResult.value) : [];
+  const gateAll = gateResult.status === 'fulfilled' ? normalizeGateTickers(gateResult.value) : [];
+  const gateVolumeRatio = deriveGateVolumeRatio(okxAll, gateAll, cfg.minQuoteVolume);
+  const gateMinQuoteVolume = Math.min(
+    cfg.minQuoteVolume,
+    Math.max(GATE_MIN_QUOTE_VOLUME, cfg.minQuoteVolume * gateVolumeRatio),
+  );
+  const effectiveGateVolumeRatio = gateMinQuoteVolume / cfg.minQuoteVolume;
+  const okxEligible = okxAll
+    .filter((ticker) => ticker.quoteVolumeFloat >= cfg.minQuoteVolume)
+    .map((ticker) => ({
+      ...ticker,
+      minQuoteVolume: cfg.minQuoteVolume,
+      normalizedQuoteVolume: ticker.quoteVolumeFloat,
+    }));
+  const gateEligible = gateAll
+    .filter((ticker) => ticker.quoteVolumeFloat >= gateMinQuoteVolume)
+    .map((ticker) => ({
+      ...ticker,
+      minQuoteVolume: gateMinQuoteVolume,
+      normalizedQuoteVolume: ticker.quoteVolumeFloat / effectiveGateVolumeRatio,
+    }));
+  const ranked = mergeProviderInstruments(okxEligible, gateEligible, okxAll)
+    .sort((a, b) => b.normalizedQuoteVolume - a.normalizedQuoteVolume)
     .map((ticker, index) => ({ ...ticker, rank: index + 1 }));
+
+  return {
+    ranked,
+    providerMeta: {
+      okxListed: okxAll.length,
+      okxEligible: okxEligible.length,
+      gateListed: gateAll.length,
+      gateEligible: gateEligible.length,
+      gateExclusive: ranked.filter((ticker) => ticker.marketProvider === 'gate').length,
+      gateVolumeRatio,
+      effectiveGateVolumeRatio,
+      gateMinQuoteVolume,
+      okxError: okxResult.status === 'rejected' ? String(okxResult.reason) : null,
+      gateError: gateResult.status === 'rejected' ? String(gateResult.reason) : null,
+    },
+  };
 }
 
-async function tickerPrice(instId) {
-  const data = await okx('/api/v5/market/ticker', { instId });
-  return Number(data?.[0]?.last || 0);
+function normalizeOkxTickers(tickers) {
+  return tickers
+    .filter((ticker) => ticker.instId?.endsWith('-USDT-SWAP'))
+    .map((ticker) => {
+      const last = Number(ticker.last || 0);
+      const open24h = Number(ticker.open24h || 0);
+      const high24h = Number(ticker.high24h || 0);
+      const low24h = Number(ticker.low24h || 0);
+      const quoteVolumeFloat = last * Number(ticker.volCcy24h || 0);
+      const change24h = open24h ? (last / open24h - 1) * 100 : 0;
+      const range24hPosition = high24h > low24h ? (last - low24h) / (high24h - low24h) : 0.5;
+      return {
+        instId: ticker.instId,
+        symbol: symbolFromInstId(ticker.instId),
+        marketProvider: 'okx',
+        last,
+        open24h,
+        high24h,
+        low24h,
+        change24h,
+        range24hPosition,
+        quoteVolumeFloat,
+      };
+    })
+    .filter(validTicker);
+}
+
+function normalizeGateTickers(tickers) {
+  return tickers
+    .filter((ticker) => ticker.contract?.endsWith('_USDT'))
+    .map((ticker) => {
+      const last = Number(ticker.last || 0);
+      const change24h = Number(ticker.change_percentage || 0);
+      const open24h = change24h > -100 ? last / (1 + change24h / 100) : 0;
+      const high24h = Number(ticker.high_24h || 0);
+      const low24h = Number(ticker.low_24h || 0);
+      const range24hPosition = high24h > low24h ? (last - low24h) / (high24h - low24h) : 0.5;
+      return {
+        instId: ticker.contract,
+        symbol: symbolFromInstId(ticker.contract),
+        marketProvider: 'gate',
+        last,
+        open24h,
+        high24h,
+        low24h,
+        change24h,
+        range24hPosition,
+        quoteVolumeFloat: Number(ticker.volume_24h_quote || ticker.volume_24h_settle || 0),
+      };
+    })
+    .filter(validTicker);
+}
+
+function validTicker(ticker) {
+  return ticker.symbol
+    && Number.isFinite(ticker.last)
+    && ticker.last > 0
+    && Number.isFinite(ticker.quoteVolumeFloat)
+    && ticker.quoteVolumeFloat > 0;
+}
+
+function deriveGateVolumeRatio(okxTickers, gateTickers, okxMinQuoteVolume) {
+  const gateBySymbol = new Map(gateTickers.map((ticker) => [ticker.symbol, ticker]));
+  const ratios = okxTickers
+    .filter((ticker) => ticker.quoteVolumeFloat >= okxMinQuoteVolume)
+    .map((ticker) => {
+      const gateTicker = gateBySymbol.get(ticker.symbol);
+      return gateTicker?.quoteVolumeFloat >= 1_000_000
+        ? gateTicker.quoteVolumeFloat / ticker.quoteVolumeFloat
+        : null;
+    })
+    .filter((ratio) => Number.isFinite(ratio) && ratio > 0)
+    .sort((a, b) => a - b);
+  if (ratios.length < 10) return GATE_FALLBACK_VOLUME_RATIO;
+  const middle = Math.floor(ratios.length / 2);
+  return ratios.length % 2
+    ? ratios[middle]
+    : (ratios[middle - 1] + ratios[middle]) / 2;
+}
+
+function mergeProviderInstruments(okxEligible, gateEligible, okxAll = okxEligible) {
+  const okxListedSymbols = new Set(okxAll.map((ticker) => ticker.symbol));
+  const gateExclusive = gateEligible.filter((ticker) => !okxListedSymbols.has(ticker.symbol));
+  return [...okxEligible, ...gateExclusive];
+}
+
+async function tickerPrice(provider, instId) {
+  let price;
+  if (provider === 'gate') {
+    const data = await gate('/api/v4/futures/usdt/tickers', { contract: instId });
+    price = Number(data?.[0]?.last || 0);
+  } else {
+    const data = await okx('/api/v5/market/ticker', { instId });
+    price = Number(data?.[0]?.last || 0);
+  }
+  if (!Number.isFinite(price) || price <= 0) throw new Error(`${provider} ticker price unavailable: ${instId}`);
+  return price;
 }
 
 async function currentPrices(state) {
-  const wanted = new Set(
-    [...(state.signals || []), ...(state.recentSignals || []), ...(state.positions || [])]
-      .map((item) => item.instId)
-      .filter(Boolean),
-  );
-  if (!wanted.size) return {};
+  const wantedItems = [...(state.signals || []), ...(state.recentSignals || []), ...(state.positions || [])]
+    .filter((item) => item?.instId);
+  if (!wantedItems.length) return {};
 
-  const tickers = await okx('/api/v5/market/tickers', { instType: 'SWAP' });
-  return Object.fromEntries(tickers
-    .filter((ticker) => wanted.has(ticker.instId))
-    .map((ticker) => [ticker.instId, {
-      instId: ticker.instId,
-      symbol: symbolFromInstId(ticker.instId),
-      last: Number(ticker.last || 0),
-      timestamp: Number(ticker.ts || Date.now()),
-    }])
+  const wantedByProvider = {
+    okx: new Set(wantedItems.filter((item) => (item.marketProvider || providerFromInstId(item.instId)) === 'okx').map((item) => item.instId)),
+    gate: new Set(wantedItems.filter((item) => (item.marketProvider || providerFromInstId(item.instId)) === 'gate').map((item) => item.instId)),
+  };
+  const requests = [];
+  if (wantedByProvider.okx.size) {
+    requests.push(okx('/api/v5/market/tickers', { instType: 'SWAP' }).then((tickers) => tickers
+      .filter((ticker) => wantedByProvider.okx.has(ticker.instId))
+      .map((ticker) => [ticker.instId, {
+        instId: ticker.instId,
+        symbol: symbolFromInstId(ticker.instId),
+        marketProvider: 'okx',
+        last: Number(ticker.last || 0),
+        timestamp: Number(ticker.ts || Date.now()),
+      }])));
+  }
+  if (wantedByProvider.gate.size) {
+    requests.push(gate('/api/v4/futures/usdt/tickers').then((tickers) => tickers
+      .filter((ticker) => wantedByProvider.gate.has(ticker.contract))
+      .map((ticker) => [ticker.contract, {
+        instId: ticker.contract,
+        symbol: symbolFromInstId(ticker.contract),
+        marketProvider: 'gate',
+        last: Number(ticker.last || 0),
+        timestamp: Date.now(),
+      }])));
+  }
+  const results = await Promise.allSettled(requests);
+  return Object.fromEntries(results
+    .filter((result) => result.status === 'fulfilled')
+    .flatMap((result) => result.value)
     .filter(([, price]) => Number.isFinite(price.last) && price.last > 0));
 }
 
-async function klines(instId, interval = '15m', limit = 130) {
+async function marketKlines(provider, instId, interval = '15m', limit = 130) {
+  if (provider === 'gate') {
+    const rows = await gate('/api/v4/futures/usdt/candlesticks', { contract: instId, interval, limit }, 0, 0);
+    return normalizeGateKlines(rows);
+  }
   // Keep K-line scans to one subrequest each. Retrying dozens of rate-limited
   // symbols in the same invocation can exceed Cloudflare's subrequest cap.
   const rows = await okx('/api/v5/market/history-candles', { instId, bar: interval, limit }, 0, 0);
   return rows
     .map((row) => [Number(row[0]), Number(row[1]), Number(row[2]), Number(row[3]), Number(row[4]), Number(row[5])])
+    .filter((row) => row.every((value) => Number.isFinite(value)))
+    .sort((a, b) => a[0] - b[0]);
+}
+
+function normalizeGateKlines(rows) {
+  return rows
+    .map((row) => [Number(row.t) * 1000, Number(row.o), Number(row.h), Number(row.l), Number(row.c), Number(row.v)])
     .filter((row) => row.every((value) => Number.isFinite(value)))
     .sort((a, b) => a[0] - b[0]);
 }
@@ -690,9 +885,30 @@ async function okx(path, params = {}, attempt = 0, maxRetries = 2) {
   return payload.data || [];
 }
 
+async function gate(path, params = {}, attempt = 0, maxRetries = 2) {
+  const url = new URL(path, GATE_API);
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null) url.searchParams.set(key, value);
+  }
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: 'application/json',
+      'User-Agent': 'momentum-trader-claude-runner/1.0',
+    },
+    cf: { cacheTtl: 0 },
+  });
+  if ((response.status === 429 || response.status >= 500) && attempt < maxRetries) {
+    await sleep(500 * (attempt + 1));
+    return gate(path, params, attempt + 1, maxRetries);
+  }
+  if (!response.ok) throw new Error(`Gate ${path} ${response.status}`);
+  return response.json();
+}
+
 function scanFailureReason(error) {
   const message = String(error?.message || error || '');
-  if (message.includes('429') || message.includes('50011')) return 'okx_rate_limit';
+  if (message.includes('Gate') && message.includes('429')) return 'gate_rate_limit';
+  if (message.includes('OKX') && (message.includes('429') || message.includes('50011'))) return 'okx_rate_limit';
   if (message.includes('Too many subrequests')) return 'worker_subrequest_limit';
   return 'other';
 }
@@ -873,7 +1089,7 @@ function closePosition(state, p, exit, reason, exitTime) {
   state.peakEquity = Math.max(state.peakEquity, state.equity);
   const mfePct = p.side === 'short' ? (p.entry - (p.lowest || p.entry)) / p.entry * 100 : pct(p.entry, p.highest) || 0;
   const maePct = p.side === 'short' ? (p.entry - (p.highest || p.entry)) / p.entry * 100 : pct(p.entry, p.lowest) || 0;
-  state.trades.unshift({ symbol: p.symbol, instId: p.instId, strategyKey: p.strategyKey, strategyLabel: p.strategyLabel, side: p.side || 'long', entryTime: p.entryTime, exitTime, entry: p.entry, exit, qty: p.qty, pnl: totalPnl, rMultiple: safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct, maePct, score: p.score, partialExits: p.partialExits || [] });
+  state.trades.unshift({ symbol: p.symbol, instId: p.instId, marketProvider: p.marketProvider || providerFromInstId(p.instId), strategyKey: p.strategyKey, strategyLabel: p.strategyLabel, side: p.side || 'long', entryTime: p.entryTime, exitTime, entry: p.entry, exit, qty: p.qty, pnl: totalPnl, rMultiple: safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct, maePct, score: p.score, partialExits: p.partialExits || [] });
   state.trades = state.trades.slice(0, 500);
   state.equityCurve.push({ timeMs: exitTime, equity: state.equity, drawdownPct: safeDiv(state.peakEquity - state.equity, state.peakEquity, 0) * 100 });
   state.equityCurve = state.equityCurve.slice(-1000);
@@ -961,9 +1177,11 @@ async function notifyNewPosition(env, position, state) {
 
 function positionNotificationText(position) {
   const sideText = position.side === 'short' ? '空單' : '多單';
+  const providerText = position.marketProvider === 'gate' ? 'Gate' : 'OKX';
   const reasons = (position.reasons || []).slice(0, 3).join('\n- ');
   return [
     `新模擬單：${position.symbol} ${sideText}`,
+    `來源：${providerText}`,
     `策略：${position.strategyLabel || position.strategyKey}`,
     `分數：${position.score}`,
     `進場：${fmtNumber(position.entry, 8)}`,
@@ -1392,11 +1610,19 @@ function sideForStrategy(key) {
 }
 
 function symbolFromInstId(instId) {
+  if (providerFromInstId(instId) === 'gate') {
+    return instId.slice(0, -'_USDT'.length).replaceAll('_', '') + 'USDT';
+  }
   return instId.replace('-USDT-SWAP', 'USDT').replaceAll('-', '');
 }
 
-function instIdFromSymbol(symbol) {
-  return `${symbol.replace(/USDT$/, '')}-USDT-SWAP`;
+function providerFromInstId(instId) {
+  return String(instId || '').endsWith('_USDT') ? 'gate' : 'okx';
+}
+
+function instIdFromSymbol(symbol, provider = 'okx') {
+  const base = symbol.replace(/USDT$/, '');
+  return provider === 'gate' ? `${base}_USDT` : `${base}-USDT-SWAP`;
 }
 
 function anomalyScore(ticker, previous) {
@@ -1406,7 +1632,7 @@ function anomalyScore(ticker, previous) {
   const quoteVolumeGrowthPct = previous?.quoteVolumeFloat
     ? Math.max(0, (ticker.quoteVolumeFloat / previous.quoteVolumeFloat - 1) * 100)
     : 0;
-  const liquidityWeight = Math.max(0, Math.log10(Math.max(ticker.quoteVolumeFloat, 1) / 1_000_000));
+  const liquidityWeight = Math.max(0, Math.log10(Math.max(ticker.normalizedQuoteVolume || ticker.quoteVolumeFloat, 1) / 1_000_000));
 
   return positiveChange * 2
     + rangePressure * 1.2
@@ -1415,18 +1641,22 @@ function anomalyScore(ticker, previous) {
     + liquidityWeight * 2;
 }
 
-function buildTickerSnapshot(ranked) {
+function buildTickerSnapshot(ranked, providerMeta = {}) {
   const items = {};
   for (const ticker of ranked.slice(0, 240)) {
     items[ticker.instId] = {
       rank: ticker.rank,
+      symbol: ticker.symbol,
+      marketProvider: ticker.marketProvider,
+      minQuoteVolume: ticker.minQuoteVolume,
+      normalizedQuoteVolume: ticker.normalizedQuoteVolume,
       last: ticker.last,
       change24h: ticker.change24h,
       range24hPosition: ticker.range24hPosition,
       quoteVolumeFloat: ticker.quoteVolumeFloat,
     };
   }
-  return { savedAt: Date.now(), items };
+  return { savedAt: Date.now(), providerMeta, items };
 }
 
 function rankedFromTickerSnapshot(snapshot, cfg, now = Date.now()) {
@@ -1435,14 +1665,25 @@ function rankedFromTickerSnapshot(snapshot, cfg, now = Date.now()) {
   return Object.entries(snapshot.items)
     .map(([instId, ticker]) => ({
       instId,
-      symbol: symbolFromInstId(instId),
+      symbol: ticker.symbol || symbolFromInstId(instId),
+      marketProvider: ticker.marketProvider || providerFromInstId(instId),
       last: Number(ticker.last || 0),
       change24h: Number(ticker.change24h || 0),
       range24hPosition: Number(ticker.range24hPosition ?? 0.5),
       quoteVolumeFloat: Number(ticker.quoteVolumeFloat || 0),
+      minQuoteVolume: Number(ticker.minQuoteVolume || (
+        (ticker.marketProvider || providerFromInstId(instId)) === 'gate'
+          ? snapshot.providerMeta?.gateMinQuoteVolume || GATE_MIN_QUOTE_VOLUME
+          : cfg.minQuoteVolume
+      )),
+      normalizedQuoteVolume: Number(ticker.normalizedQuoteVolume || ticker.quoteVolumeFloat || 0),
       rank: Number(ticker.rank || 0),
     }))
-    .filter((ticker) => ticker.instId.endsWith('-USDT-SWAP') && ticker.quoteVolumeFloat >= cfg.minQuoteVolume)
+    .filter((ticker) => (
+      ticker.marketProvider === 'gate'
+        ? ticker.quoteVolumeFloat >= Number(snapshot.providerMeta?.gateMinQuoteVolume || GATE_MIN_QUOTE_VOLUME)
+        : ticker.quoteVolumeFloat >= cfg.minQuoteVolume
+    ))
     .sort((a, b) => a.rank - b.rank || b.quoteVolumeFloat - a.quoteVolumeFloat);
 }
 
