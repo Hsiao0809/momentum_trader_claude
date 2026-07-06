@@ -104,6 +104,7 @@
     .pill.high{color:var(--green);border-color:rgba(123,174,113,.45);background:rgba(123,174,113,.08)}
     .signal-recency{display:inline-block;margin-left:5px;color:var(--muted);font-size:9px;font-weight:600;vertical-align:middle}
     .market-tag{display:inline-block;margin-left:5px;color:var(--muted);font-size:9px;font-weight:700;vertical-align:middle;text-transform:uppercase}
+    .exit-detail{display:block;margin-top:2px;color:var(--muted);font-size:9px;line-height:1.25}
     tr.recent-signal td{opacity:.72}
     tr.recent-signal:hover td{opacity:1}
     .reason{max-width:420px;overflow:hidden;text-overflow:ellipsis;text-align:left;color:var(--muted)}
@@ -320,7 +321,7 @@
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th class="sym">Symbol</th><th class="left">Strategy</th><th>多空</th><th>Entry</th><th>Exit</th><th>R</th><th>PnL U</th><th>MFE%</th><th>MAE%</th><th>Score</th><th>時數</th><th>Entry time</th><th>Exit time</th><th class="left">Reason</th>
+          <th class="sym">Symbol</th><th class="left">Strategy</th><th>多空</th><th>Entry</th><th>Avg Exit</th><th>R</th><th>PnL U</th><th>MFE%</th><th>MAE%</th><th>Score</th><th>時數</th><th>Entry time</th><th>Exit time</th><th class="left">Reason</th>
         </tr></thead>
         <tbody id="tradesBody"></tbody>
       </table>
@@ -1660,6 +1661,24 @@ function symLink(sym, provider=''){
   const tag = source ? `<span class="market-tag">${source}</span>` : '';
   return `<a class="sym-link" href="${tvHref(sym, provider)}" target="_blank" rel="noopener noreferrer" title="Open ${htmlEscape(sym)} on TradingView"><strong>${htmlEscape(sym)}</strong></a>${tag}`;
 }
+function tradeExitSummary(trade){
+  const totalQty = Math.max(0, Number(trade?.qty) || 0);
+  const partials = (Array.isArray(trade?.partialExits) ? trade.partialExits : [])
+    .map(exit => ({ type:exit.type || 'partial', exit:Number(exit.exit), qty:Math.max(0, Number(exit.qty) || 0) }))
+    .filter(exit => Number.isFinite(exit.exit) && exit.exit > 0 && exit.qty > 0);
+  const partialQty = partials.reduce((sum, exit) => sum + exit.qty, 0);
+  const finalExit = Number(trade?.exit) || 0;
+  const finalQty = Math.max(0, totalQty - partialQty);
+  const legs = [...partials];
+  if(finalQty > 0 || !legs.length) legs.push({ type:'final', exit:finalExit, qty:finalQty || totalQty });
+  const accountedQty = legs.reduce((sum, exit) => sum + exit.qty, 0);
+  const weightedExit = legs.reduce((sum, exit) => sum + exit.exit * exit.qty, 0);
+  const averageExit = accountedQty > 0 ? weightedExit / accountedQty : finalExit;
+  return {
+    averageExit,
+    legs:legs.map(exit => ({ ...exit, sharePct:accountedQty > 0 ? exit.qty / accountedQty * 100 : 0 })),
+  };
+}
 function statsFromTrades(trades){
   let gp = 0, gl = 0, wins = 0, r = 0, pnl = 0;
   trades.forEach(t => { const p = Number(t.pnl || 0), rr = Number(t.rMultiple || 0); pnl += p; r += rr; if(p >= 0){ gp += p; wins++; } else gl += Math.abs(p); });
@@ -2162,7 +2181,12 @@ function paintAll(){
   document.getElementById('tradesBody').innerHTML = visibleTrades.length ? visibleTrades.slice(0,100).map(t => {
     const holdH = (t.exitTime && t.entryTime) ? fmt((t.exitTime - t.entryTime) / 3600000, 1) : '—';
     const sideLabel = (t.side || 'long') === 'short' ? '<span class="neg" style="font-weight:600">空</span>' : '<span class="pos" style="font-weight:600">多</span>';
-    return `<tr><td class="sym">${symLink(t.symbol, t.marketProvider)}</td><td class="left">${htmlEscape(strategyName(t))}</td><td>${sideLabel}</td><td>${fmt(t.entry,8)}</td><td>${fmt(t.exit,8)}</td><td class="${signedClass(t.rMultiple)}">${fmt(t.rMultiple,2)}</td><td class="${signedClass(t.pnl)}">${fmt(t.pnl,2)}</td><td class="pos">${showPct(t.mfePct)}</td><td class="neg">${showPct(t.maePct)}</td><td>${fmt(t.score,0)}</td><td>${holdH}h</td><td>${tw(t.entryTime)}</td><td>${tw(t.exitTime)}</td><td class="left">${htmlEscape(t.reason)}</td></tr>`;
+    const exitSummary = tradeExitSummary(t);
+    const exitDetail = exitSummary.legs.length > 1
+      ? `<span class="exit-detail">${exitSummary.legs.map((leg, index) => `${leg.type === 'tp1' ? 'TP1' : index === exitSummary.legs.length - 1 ? '末筆' : '分批'} ${fmt(leg.exit,8)} × ${fmt(leg.sharePct,0)}%`).join(' · ')}</span>`
+      : '';
+    const exitCell = `${fmt(exitSummary.averageExit,8)}${exitDetail}`;
+    return `<tr><td class="sym">${symLink(t.symbol, t.marketProvider)}</td><td class="left">${htmlEscape(strategyName(t))}</td><td>${sideLabel}</td><td>${fmt(t.entry,8)}</td><td>${exitCell}</td><td class="${signedClass(t.rMultiple)}">${fmt(t.rMultiple,2)}</td><td class="${signedClass(t.pnl)}">${fmt(t.pnl,2)}</td><td class="pos">${showPct(t.mfePct)}</td><td class="neg">${showPct(t.maePct)}</td><td>${fmt(t.score,0)}</td><td>${holdH}h</td><td>${tw(t.entryTime)}</td><td>${tw(t.exitTime)}</td><td class="left">${htmlEscape(REASON_LABELS[t.reason] || t.reason)}</td></tr>`;
   }).join('') : `<tr><td class="sym muted" colspan="14">${state.trades.length ? 'No matching trades' : 'No closed paper trade'}</td></tr>`;
   paintPnl();
   paintReview();
