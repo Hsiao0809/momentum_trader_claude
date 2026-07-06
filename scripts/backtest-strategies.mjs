@@ -20,22 +20,36 @@ import assert from 'node:assert/strict';
 const CACHE_DIR = new URL('.cache/', import.meta.url);
 const DATASET_FILE = new URL('.cache/okx-candles.json', import.meta.url);
 
-function extractFunction(source, name) {
-  const start = source.indexOf(`function ${name}(`);
-  assert.notEqual(start, -1, `${name} was not found in source`);
-  const bodyStart = source.indexOf('{', start);
+function braceMatchedSlice(source, start, openIndex) {
   let depth = 0;
-  for (let i = bodyStart; i < source.length; i++) {
+  for (let i = openIndex; i < source.length; i++) {
     if (source[i] === '{') depth++;
     if (source[i] === '}') {
       depth--;
       if (depth === 0) return source.slice(start, i + 1);
     }
   }
-  throw new Error(`${name} has no closing brace`);
+  throw new Error('no closing brace found');
 }
 
-function loadStrategyModule(source, cfgOverrides = {}) {
+function extractFunction(source, name) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `function ${name} was not found in source`);
+  return braceMatchedSlice(source, start, source.indexOf('{', start));
+}
+
+// Extract a `const NAME = {...}` object literal so the harness always runs
+// with the dashboard's real constants — hardcoded copies would silently go
+// stale when someone tunes CFG or adds a strategy.
+function extractConst(source, name) {
+  const start = source.indexOf(`const ${name} = {`);
+  assert.notEqual(start, -1, `const ${name} was not found in source`);
+  return braceMatchedSlice(source, start, source.indexOf('{', start)) + ';';
+}
+
+function loadStrategyModule(source) {
+  const constants = ['INTERVAL_MS', 'LABELS', 'STRATEGY_SIDES', 'CFG']
+    .map((name) => extractConst(source, name)).join('\n');
   const names = [
     'nowMs', 'evaluateSignal', 'classifyMarketContext', 'closedKlines', 'atrPct', 'rangePosition',
     'buildRisk', 'strategyKey', 'sideForStrategy', 'btcRiskOff',
@@ -44,32 +58,10 @@ function loadStrategyModule(source, cfgOverrides = {}) {
     'simulateTrade', 'positionSize', 'applyPortfolio', 'summarize', 'findIndex',
   ];
   const dependencies = names.map((name) => extractFunction(source, name)).join('\n');
-  const cfg = {
-    minQuoteVolume: 20_000_000, minSignalScore: 70, paperMinScore: 82,
-    initialEquity: 1000, riskPerTrade: 0.01, maxPositions: 5, maxTotalRisk: 0.05,
-    maxHoldHours: 72, cooldownBars: 96,
-    ...cfgOverrides,
-  };
   const factory = new Function(`
-    const INTERVAL_MS = { '15m': 900000 };
-    const LABELS = {
-      pullback_uptrend: '上升趨勢回檔',
-      volume_breakout_follow: '放量突破跟進',
-      impulse_pullback_reclaim: '急拉回檔確認',
-      rally_downtrend: '下降趨勢反彈',
-      strong_momentum_breakout: '強動量突破追價',
-      volume_ignition: '放量啟動追隨',
-      high_range_continuation: '高位續勢承接',
-      narrative_momentum: '題材動量順勢',
-    };
-    const STRATEGY_SIDES = ${JSON.stringify({
-      pullback_uptrend: 'long', volume_breakout_follow: 'long', impulse_pullback_reclaim: 'long',
-      rally_downtrend: 'short', strong_momentum_breakout: 'long', volume_ignition: 'long',
-      high_range_continuation: 'long', narrative_momentum: 'long',
-    })};
-    const CFG = ${JSON.stringify(cfg)};
+    ${constants}
     ${dependencies}
-    return { evaluateSignal, simulateTrade, applyPortfolio, summarize, findIndex, kTime, kClose, pct };
+    return { evaluateSignal, simulateTrade, applyPortfolio, summarize, findIndex, kTime, kClose, pct, CFG };
   `);
   return factory();
 }
@@ -133,9 +125,13 @@ const btc = candles['BTC-USDT-SWAP'];
 if (!btc) throw new Error('BTC-USDT-SWAP missing from dataset — re-run fetch-okx-candles.mjs');
 const riskOffAt = riskOffLookup(btc, mod);
 
-const MIN_SCORE = 82;       // paperMinScore — matches production open-position gate
-const NARRATIVE_MIN = 90;   // narrative_momentum's extra-strict gate (see evaluateSignal / paperTick)
-const COOLDOWN_BARS = 96;
+// Gates mirror production paperTick (HTML) / openNewPositions (worker):
+// paperMinScore for everything, +8 extra for narrative_momentum (the
+// catch-all bucket). Values come from the extracted CFG so they track the
+// dashboard automatically.
+const MIN_SCORE = mod.CFG.paperMinScore;
+const NARRATIVE_MIN = mod.CFG.paperMinScore + 8;
+const COOLDOWN_BARS = mod.CFG.cooldownBars;
 
 const candidates = [];
 for (const [instId, rows] of Object.entries(candles)) {

@@ -41,17 +41,23 @@ console.log('universe:', usdt.map((t) => t.instId).join(', '));
 const targets = ['BTC-USDT-SWAP', ...usdt.map((t) => t.instId).filter((i) => i !== 'BTC-USDT-SWAP')];
 const candles = {};
 for (const instId of targets) {
-  const rows = {};
-  let after = Date.now() + 1;
-  while (Object.keys(rows).length < BARS) {
-    const batch = await okx(`/api/v5/market/history-candles?instId=${instId}&bar=15m&after=${after}&limit=100`);
-    if (!batch.length) break;
-    for (const row of batch) rows[Number(row[0])] = row;
-    after = Math.min(...batch.map((row) => Number(row[0])));
-    await sleep(130);
+  try {
+    const rows = {};
+    let after = Date.now() + 1;
+    while (Object.keys(rows).length < BARS) {
+      const batch = await okx(`/api/v5/market/history-candles?instId=${instId}&bar=15m&after=${after}&limit=100`);
+      if (!batch.length) break;
+      for (const row of batch) rows[Number(row[0])] = row;
+      after = Math.min(...batch.map((row) => Number(row[0])));
+      await sleep(130);
+    }
+    candles[instId] = Object.keys(rows).map(Number).sort((a, b) => a - b).map((k) => rows[k]);
+    console.log(instId, candles[instId].length, 'bars');
+  } catch (err) {
+    // BTC is required downstream (risk-off context); anything else is skippable.
+    if (instId === 'BTC-USDT-SWAP') throw err;
+    console.warn(`skip ${instId}: ${err.message}`);
   }
-  candles[instId] = Object.keys(rows).map(Number).sort((a, b) => a - b).map((k) => rows[k]);
-  console.log(instId, candles[instId].length, 'bars');
 }
 
 await mkdir(CACHE_DIR, { recursive: true });
