@@ -1197,9 +1197,9 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
     if(kClose(lastBar) <= kOpen(lastBar)) return null;
 
     const isImpulsePullback = marketContext.isConfirmedPullback;
-    // 深度要求：position24h 上限 0.70，排除高位盤整假回檔
+    // 深度要求：position24h 上限 0.80，排除高位盤整假回檔（回測甜蜜點：PF 1.56 優於 0.70/0.85）
     const isPullback = isImpulsePullback
-      || (momentum24h >= 5 && momentum4h >= -1 && momentum1h <= 0.5 && momentum1h >= -3 && position24h >= 0.40 && position24h <= 0.70);
+      || (momentum24h >= 5 && momentum4h >= -1 && momentum1h <= 0.5 && momentum1h >= -3 && position24h >= 0.40 && position24h <= 0.80);
     const risk = buildRisk(price, atrValue, 'long', swingLow * 0.995);
     let score = 10;
     const reasons = [`24h quote volume ${Math.round(quoteVolume).toLocaleString()} USDT`];
