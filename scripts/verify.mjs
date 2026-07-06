@@ -38,6 +38,10 @@ step('closed-trade average exit and partial-exit display', () => {
   execFileSync(process.execPath, ['scripts/verify-trade-exits.mjs']);
 });
 
+step('position activity recording and legacy reconstruction', () => {
+  execFileSync(process.execPath, ['scripts/verify-position-events.mjs']);
+});
+
 const html = await readFile('momentum_trader_claude.html', 'utf8');
 // Match <script> tags with or without attributes; skip external (src=) scripts.
 const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]

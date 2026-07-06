@@ -322,6 +322,7 @@ function normalizeState(state) {
   normalizeMarketProviders(normalized.recentSignals);
   normalizeMarketProviders(normalized.positions);
   normalizeMarketProviders(normalized.trades);
+  for (const position of normalized.positions) ensurePositionEvents(position);
   return normalized;
 }
 
@@ -468,16 +469,17 @@ async function openNewPositions(state, env) {
     const sized = positionSize(state.equity, sig.entry, sig.stop, cfg);
     if (totalRisk + sized.riskUsdt > state.equity * cfg.maxTotalRisk) break;
 
+    const entryTime = Date.now();
     const position = {
-      id: `p_${Date.now()}_${sig.symbol}`,
+      id: `p_${entryTime}_${sig.symbol}`,
       symbol: sig.symbol,
       instId: sig.instId,
       marketProvider: sig.marketProvider || providerFromInstId(sig.instId),
       strategyKey: sig.strategyKey,
       strategyLabel: sig.strategyLabel,
       side: sig.side || 'long',
-      entryTime: Date.now(),
-      lastTime: Date.now(),
+      entryTime,
+      lastTime: entryTime,
       entry: sig.entry,
       last: sig.entry,
       qty: sized.qty,
@@ -500,8 +502,17 @@ async function openNewPositions(state, env) {
       riskUsdt: sized.riskUsdt,
       realizedPnl: 0,
       partialExits: [],
+      events: [],
       reasons: sig.reasons,
     };
+    recordPositionEvent(position, {
+      type: 'open',
+      time: entryTime,
+      price: position.entry,
+      qtyDelta: position.qty,
+      remainingQty: position.qty,
+      stop: position.stop,
+    });
     state.positions.push(position);
     totalRisk += sized.riskUsdt;
     openSymbols.add(sig.symbol);
@@ -530,6 +541,7 @@ async function updatePositions(state, options = {}) {
         p.lowest = Math.min(p.lowest || p.entry, low);
         p.last = close;
 
+        recordProtectionEvents(p, kTime(bar));
         takeBreakEvenPartial(state, p, kTime(bar));
         const effectiveStop = effectiveStopFor(p);
         if (p.side === 'short' ? high >= effectiveStop : low <= effectiveStop) {
@@ -552,6 +564,7 @@ async function updatePositions(state, options = {}) {
         p.last = price;
         p.highest = Math.max(p.highest || p.entry, price);
         p.lowest = Math.min(p.lowest || p.entry, price);
+        recordProtectionEvents(p, Date.now());
         takeBreakEvenPartial(state, p, Date.now());
         const effectiveStop = effectiveStopFor(p);
         if (p.side === 'short' ? price >= effectiveStop : price <= effectiveStop) {
@@ -1082,6 +1095,110 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
   return null;
 }
 
+function recordPositionEvent(position, event) {
+  position.events = Array.isArray(position.events) ? position.events : [];
+  const time = Number(event.time || Date.now());
+  position.events.push({
+    id: `${position.id || position.symbol}_${event.type}_${time}_${position.events.length}`,
+    type: event.type,
+    time,
+    price: Number(event.price || 0),
+    qtyDelta: Number(event.qtyDelta || 0),
+    remainingQty: Number(event.remainingQty ?? position.remainingQty ?? 0),
+    stop: Number(event.stop ?? position.stop ?? 0),
+    pnl: Number(event.pnl || 0),
+    reason: event.reason || '',
+    note: event.note || '',
+  });
+  position.events = position.events.slice(-50);
+}
+
+function ensurePositionEvents(position) {
+  if (Array.isArray(position.events) && position.events.length) return;
+  position.events = [];
+  recordPositionEvent(position, {
+    type: 'open',
+    time: position.entryTime,
+    price: position.entry,
+    qtyDelta: position.qty,
+    remainingQty: position.qty,
+    stop: position.originalStop || position.stop,
+    note: 'reconstructed',
+  });
+  let remainingQty = Number(position.qty || 0);
+  for (const partial of [...(position.partialExits || [])].sort((a, b) => Number(a.exitTime || 0) - Number(b.exitTime || 0))) {
+    const qty = Math.max(0, Number(partial.qty || 0));
+    remainingQty = Math.max(0, remainingQty - qty);
+    recordPositionEvent(position, {
+      type: partial.type === 'tp1' ? 'tp1' : 'partial_exit',
+      time: partial.exitTime,
+      price: partial.exit,
+      qtyDelta: -qty,
+      remainingQty,
+      stop: position.entry,
+      pnl: partial.pnl,
+      note: 'reconstructed',
+    });
+  }
+  const reconstructedAt = Number(position.lastTime || position.entryTime || Date.now());
+  if (position.side !== 'short' && position.earlyTrigger && Number(position.highest || 0) >= position.earlyTrigger) {
+    recordPositionEvent(position, {
+      type: 'early_protection',
+      time: reconstructedAt,
+      price: position.earlyTrigger,
+      remainingQty: position.remainingQty,
+      stop: position.earlyLevel || position.entry * 0.99,
+      note: 'reconstructed',
+    });
+  }
+  const lockTriggered = position.side === 'short'
+    ? position.lockTrigger && Number(position.lowest || position.entry) <= position.lockTrigger
+    : position.lockTrigger && Number(position.highest || position.entry) >= position.lockTrigger;
+  if (lockTriggered) {
+    recordPositionEvent(position, {
+      type: 'lock_protection',
+      time: reconstructedAt,
+      price: position.lockTrigger,
+      remainingQty: position.remainingQty,
+      stop: position.lockLevel || position.entry,
+      note: 'reconstructed',
+    });
+  }
+}
+
+function recordProtectionEvents(position, time) {
+  position.events = Array.isArray(position.events) ? position.events : [];
+  const hasEvent = (type) => position.events.some((event) => event.type === type);
+  const high = Number(position.highest || position.entry);
+  const low = Number(position.lowest || position.entry);
+  if (
+    position.side !== 'short'
+    && position.earlyTrigger
+    && high >= position.earlyTrigger
+    && !hasEvent('early_protection')
+  ) {
+    recordPositionEvent(position, {
+      type: 'early_protection',
+      time,
+      price: position.earlyTrigger,
+      remainingQty: position.remainingQty,
+      stop: position.earlyLevel || position.entry * 0.99,
+    });
+  }
+  const lockTriggered = position.side === 'short'
+    ? position.lockTrigger && low <= position.lockTrigger
+    : position.lockTrigger && high >= position.lockTrigger;
+  if (lockTriggered && !hasEvent('lock_protection')) {
+    recordPositionEvent(position, {
+      type: 'lock_protection',
+      time,
+      price: position.lockTrigger,
+      remainingQty: position.remainingQty,
+      stop: position.lockLevel || position.entry,
+    });
+  }
+}
+
 function closePosition(state, p, exit, reason, exitTime) {
   const exitPnl = p.side === 'short' ? p.remainingQty * (p.entry - exit) : p.remainingQty * (exit - p.entry);
   const totalPnl = (p.realizedPnl || 0) + exitPnl;
@@ -1089,7 +1206,17 @@ function closePosition(state, p, exit, reason, exitTime) {
   state.peakEquity = Math.max(state.peakEquity, state.equity);
   const mfePct = p.side === 'short' ? (p.entry - (p.lowest || p.entry)) / p.entry * 100 : pct(p.entry, p.highest) || 0;
   const maePct = p.side === 'short' ? (p.entry - (p.highest || p.entry)) / p.entry * 100 : pct(p.entry, p.lowest) || 0;
-  state.trades.unshift({ symbol: p.symbol, instId: p.instId, marketProvider: p.marketProvider || providerFromInstId(p.instId), strategyKey: p.strategyKey, strategyLabel: p.strategyLabel, side: p.side || 'long', entryTime: p.entryTime, exitTime, entry: p.entry, exit, qty: p.qty, pnl: totalPnl, rMultiple: safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct, maePct, score: p.score, partialExits: p.partialExits || [] });
+  recordPositionEvent(p, {
+    type: 'close',
+    time: exitTime,
+    price: exit,
+    qtyDelta: -Number(p.remainingQty || 0),
+    remainingQty: 0,
+    stop: effectiveStopFor(p),
+    pnl: exitPnl,
+    reason,
+  });
+  state.trades.unshift({ symbol: p.symbol, instId: p.instId, marketProvider: p.marketProvider || providerFromInstId(p.instId), strategyKey: p.strategyKey, strategyLabel: p.strategyLabel, side: p.side || 'long', entryTime: p.entryTime, exitTime, entry: p.entry, exit, qty: p.qty, pnl: totalPnl, rMultiple: safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct, maePct, score: p.score, partialExits: p.partialExits || [], events: p.events || [] });
   state.trades = state.trades.slice(0, 500);
   state.equityCurve.push({ timeMs: exitTime, equity: state.equity, drawdownPct: safeDiv(state.peakEquity - state.equity, state.peakEquity, 0) * 100 });
   state.equityCurve = state.equityCurve.slice(-1000);
@@ -1120,6 +1247,15 @@ function takeBreakEvenPartial(state, p, exitTime) {
   p.stop = p.entry;
   p.partialExits = p.partialExits || [];
   p.partialExits.push({ type: 'be_partial', exitTime, exit: p.beTrigger, qty: closeQty, pnl: partialPnl });
+  recordPositionEvent(p, {
+    type: 'partial_exit',
+    time: exitTime,
+    price: p.beTrigger,
+    qtyDelta: -closeQty,
+    remainingQty: p.remainingQty,
+    stop: p.stop,
+    pnl: partialPnl,
+  });
   return true;
 }
 
@@ -1134,6 +1270,15 @@ function takeTP1(state, p, exitTime) {
   p.stop = p.entry;
   p.partialExits = p.partialExits || [];
   p.partialExits.push({ type: 'tp1', exitTime, exit: p.tp1, qty: sellQty, pnl: tpPnl });
+  recordPositionEvent(p, {
+    type: 'tp1',
+    time: exitTime,
+    price: p.tp1,
+    qtyDelta: -sellQty,
+    remainingQty: p.remainingQty,
+    stop: p.stop,
+    pnl: tpPnl,
+  });
 }
 
 async function notifyNewPosition(env, position, state) {

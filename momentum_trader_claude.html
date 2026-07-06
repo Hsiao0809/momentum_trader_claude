@@ -70,7 +70,7 @@
     .run-dot.on{background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 1.8s ease-in-out infinite}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
     .spark{vertical-align:middle;margin-left:6px;border-radius:4px;background:rgba(0,0,0,.15)}
-    main{width:100%;flex:1 1 0;min-height:0;padding:10px 14px;display:grid;grid-template-rows:56px minmax(190px,30vh) minmax(155px,1fr) minmax(276px,1fr);grid-auto-rows:auto;grid-template-columns:1fr;gap:10px;max-width:1920px;margin:0 auto;overflow-x:hidden;overflow-y:auto}
+    main{width:100%;flex:1 1 0;min-height:0;padding:10px 14px;display:grid;grid-template-rows:56px minmax(190px,30vh) minmax(155px,1fr) minmax(170px,.7fr) minmax(276px,1fr);grid-auto-rows:auto;grid-template-columns:1fr;gap:10px;max-width:1920px;margin:0 auto;overflow-x:hidden;overflow-y:auto}
     main.pnl-page{display:block}
     main.pnl-page .trading-page{display:none!important}
     main.pnl-page #pnlSection{display:flex}
@@ -112,6 +112,8 @@
     a.sym-link:hover{color:var(--accent);border-bottom-color:var(--accent)}
     .cols2{display:grid!important;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr)!important;gap:10px;min-height:0;overflow:hidden}
     .trade-log-section,.lower-section{min-height:0;overflow:hidden}
+    .position-activity-section{min-height:170px}
+    .position-activity-section>.table-wrap{max-height:210px}
     .trade-log-section>.table-wrap{max-height:188px;flex:0 1 auto;scrollbar-gutter:stable}
     .trade-log-section thead tr{height:24px}
     .trade-log-section tbody tr{height:27px}
@@ -294,6 +296,18 @@
       </div>
     </section>
   </div>
+
+  <section class="position-activity-section trading-page">
+    <div class="section-head mobile-summary-stack"><h2>倉位活動紀錄</h2><div id="activitySummary" class="summary">No activity</div></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th class="sym">Symbol</th><th>Time</th><th class="left">Event</th><th>Qty Δ</th><th>Price</th><th>Remain</th><th>Stop</th><th>PnL U</th><th class="left">Note</th>
+        </tr></thead>
+        <tbody id="activityBody"></tbody>
+      </table>
+    </div>
+  </section>
 
   <section class="trade-log-section trading-page">
     <div class="section-head">
@@ -1511,11 +1525,67 @@ async function paperTick(){
     if(sig.strategyKey === 'narrative_momentum' && sig.score < CFG.paperMinScore + 8) continue;
     const sized = positionSize(state.equity, sig.entry, sig.stop);
     if(totalRisk + sized.riskUsdt > state.equity * CFG.maxTotalRisk) break;
-    state.positions.push({ id:`p_${nowMs()}_${sig.symbol}`, symbol:sig.symbol, strategyKey:sig.strategyKey, strategyLabel:sig.strategyLabel, side:sig.side||'long', entryTime:nowMs(), lastTime:nowMs(), entry:sig.entry, last:sig.entry, qty:sized.qty, remainingQty:sized.qty, stop:sig.stop, originalStop:sig.stop, tp1:sig.tp1, beTrigger:sig.beTrigger, lockTrigger:sig.lockTrigger, lockLevel:sig.lockLevel, earlyTrigger:sig.earlyTrigger, earlyLevel:sig.earlyLevel, bePartialEnabled:true, bePartialDone:false, tp1Done:false, trailPct:sig.trailPct, highest:sig.entry, lowest:sig.entry, score:sig.score, riskUsdt:sized.riskUsdt, realizedPnl:0, partialExits:[], reasons:sig.reasons });
+    const entryTime = nowMs();
+    const position = { id:`p_${entryTime}_${sig.symbol}`, symbol:sig.symbol, strategyKey:sig.strategyKey, strategyLabel:sig.strategyLabel, side:sig.side||'long', entryTime, lastTime:entryTime, entry:sig.entry, last:sig.entry, qty:sized.qty, remainingQty:sized.qty, stop:sig.stop, originalStop:sig.stop, tp1:sig.tp1, beTrigger:sig.beTrigger, lockTrigger:sig.lockTrigger, lockLevel:sig.lockLevel, earlyTrigger:sig.earlyTrigger, earlyLevel:sig.earlyLevel, bePartialEnabled:true, bePartialDone:false, tp1Done:false, trailPct:sig.trailPct, highest:sig.entry, lowest:sig.entry, score:sig.score, riskUsdt:sized.riskUsdt, realizedPnl:0, partialExits:[], events:[], reasons:sig.reasons };
+    recordPositionEvent(position, { type:'open', time:entryTime, price:position.entry, qtyDelta:position.qty, remainingQty:position.qty, stop:position.stop });
+    state.positions.push(position);
     totalRisk += sized.riskUsdt; openSymbols.add(sig.symbol);
   }
   saveState();
   } finally { paperTickRunning = false; }
+}
+function recordPositionEvent(position, event){
+  position.events = Array.isArray(position.events) ? position.events : [];
+  const time = Number(event.time || nowMs());
+  position.events.push({
+    id:`${position.id || position.symbol}_${event.type}_${time}_${position.events.length}`,
+    type:event.type,
+    time,
+    price:Number(event.price || 0),
+    qtyDelta:Number(event.qtyDelta || 0),
+    remainingQty:Number(event.remainingQty ?? position.remainingQty ?? 0),
+    stop:Number(event.stop ?? position.stop ?? 0),
+    pnl:Number(event.pnl || 0),
+    reason:event.reason || '',
+    note:event.note || '',
+  });
+  position.events = position.events.slice(-50);
+}
+function ensurePositionEvents(position){
+  if(Array.isArray(position.events) && position.events.length) return;
+  position.events = [];
+  recordPositionEvent(position, { type:'open', time:position.entryTime, price:position.entry, qtyDelta:position.qty, remainingQty:position.qty, stop:position.originalStop || position.stop, note:'reconstructed' });
+  let remainingQty = Number(position.qty || 0);
+  for(const partial of [...(position.partialExits || [])].sort((a,b) => Number(a.exitTime || 0) - Number(b.exitTime || 0))){
+    const qty = Math.max(0, Number(partial.qty || 0));
+    remainingQty = Math.max(0, remainingQty - qty);
+    recordPositionEvent(position, { type:partial.type === 'tp1' ? 'tp1' : 'partial_exit', time:partial.exitTime, price:partial.exit, qtyDelta:-qty, remainingQty, stop:position.entry, pnl:partial.pnl, note:'reconstructed' });
+  }
+  const reconstructedAt = Number(position.lastTime || position.entryTime || nowMs());
+  if(position.side !== 'short' && position.earlyTrigger && Number(position.highest || 0) >= position.earlyTrigger){
+    recordPositionEvent(position, { type:'early_protection', time:reconstructedAt, price:position.earlyTrigger, remainingQty:position.remainingQty, stop:position.earlyLevel || position.entry * 0.99, note:'reconstructed' });
+  }
+  const lockTriggered = position.side === 'short'
+    ? position.lockTrigger && Number(position.lowest || position.entry) <= position.lockTrigger
+    : position.lockTrigger && Number(position.highest || position.entry) >= position.lockTrigger;
+  if(lockTriggered){
+    recordPositionEvent(position, { type:'lock_protection', time:reconstructedAt, price:position.lockTrigger, remainingQty:position.remainingQty, stop:position.lockLevel || position.entry, note:'reconstructed' });
+  }
+}
+function recordProtectionEvents(position, time){
+  position.events = Array.isArray(position.events) ? position.events : [];
+  const hasEvent = type => position.events.some(event => event.type === type);
+  const high = Number(position.highest || position.entry);
+  const low = Number(position.lowest || position.entry);
+  if(position.side !== 'short' && position.earlyTrigger && high >= position.earlyTrigger && !hasEvent('early_protection')){
+    recordPositionEvent(position, { type:'early_protection', time, price:position.earlyTrigger, remainingQty:position.remainingQty, stop:position.earlyLevel || position.entry * 0.99 });
+  }
+  const lockTriggered = position.side === 'short'
+    ? position.lockTrigger && low <= position.lockTrigger
+    : position.lockTrigger && high >= position.lockTrigger;
+  if(lockTriggered && !hasEvent('lock_protection')){
+    recordPositionEvent(position, { type:'lock_protection', time, price:position.lockTrigger, remainingQty:position.remainingQty, stop:position.lockLevel || position.entry });
+  }
 }
 function closePosition(p, exit, reason, exitTime){
   const exitPnl = p.side === 'short'
@@ -1526,7 +1596,8 @@ function closePosition(p, exit, reason, exitTime){
   state.peakEquity = Math.max(state.peakEquity, state.equity);
   const mfePct = p.side === 'short' ? (p.entry-(p.lowest||p.entry))/p.entry*100 : pct(p.entry,p.highest)||0;
   const maePct = p.side === 'short' ? (p.entry-(p.highest||p.entry))/p.entry*100 : pct(p.entry,p.lowest)||0;
-  state.trades.unshift({ symbol:p.symbol, strategyKey:p.strategyKey, strategyLabel:p.strategyLabel, side:p.side||'long', entryTime:p.entryTime, exitTime, entry:p.entry, exit, qty:p.qty, pnl:totalPnl, rMultiple:safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct, maePct, score:p.score, partialExits:p.partialExits||[] });
+  recordPositionEvent(p, { type:'close', time:exitTime, price:exit, qtyDelta:-Number(p.remainingQty || 0), remainingQty:0, stop:effectiveStopFor(p), pnl:exitPnl, reason });
+  state.trades.unshift({ symbol:p.symbol, strategyKey:p.strategyKey, strategyLabel:p.strategyLabel, side:p.side||'long', entryTime:p.entryTime, exitTime, entry:p.entry, exit, qty:p.qty, pnl:totalPnl, rMultiple:safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct, maePct, score:p.score, partialExits:p.partialExits||[], events:p.events||[] });
   state.equityCurve.push({ timeMs:exitTime, equity:state.equity, drawdownPct:safeDiv(state.peakEquity-state.equity, state.peakEquity, 0)*100 });
   state.consecutiveLosses = totalPnl < 0 ? state.consecutiveLosses + 1 : 0;
   if(state.consecutiveLosses >= 3){ state.pausedUntil = nowMs() + 6*60*60*1000; state.consecutiveLosses = 0; }
@@ -1550,6 +1621,7 @@ function takeBreakEvenPartial(p, exitTime){
   p.stop = p.entry;
   p.partialExits = p.partialExits || [];
   p.partialExits.push({ type:'be_partial', exitTime, exit:p.beTrigger, qty:closeQty, pnl:partialPnl });
+  recordPositionEvent(p, { type:'partial_exit', time:exitTime, price:p.beTrigger, qtyDelta:-closeQty, remainingQty:p.remainingQty, stop:p.stop, pnl:partialPnl });
   return true;
 }
 function takeTP1(p, exitTime){
@@ -1563,6 +1635,7 @@ function takeTP1(p, exitTime){
   p.stop = p.entry;
   p.partialExits = p.partialExits || [];
   p.partialExits.push({ type:'tp1', exitTime, exit:p.tp1, qty:sellQty, pnl:tpPnl });
+  recordPositionEvent(p, { type:'tp1', time:exitTime, price:p.tp1, qtyDelta:-sellQty, remainingQty:p.remainingQty, stop:p.stop, pnl:tpPnl });
 }
 
 async function updatePositions(){
@@ -1570,6 +1643,7 @@ async function updatePositions(){
   for(const p of state.positions){
     let closed = false;
     try {
+      ensurePositionEvents(p);
       const rows = closedKlines(await klines(p.symbol, '15m', 300, p.lastTime - INTERVAL_MS['15m']));
       for(const bar of rows){
         if(kTime(bar) <= p.lastTime) continue;
@@ -1577,6 +1651,7 @@ async function updatePositions(){
         const high = kHigh(bar), low = kLow(bar), close = kClose(bar);
         p.highest = Math.max(p.highest, high); p.lowest = Math.min(p.lowest, low);
         p.last = close;
+        recordProtectionEvents(p, kTime(bar));
         takeBreakEvenPartial(p, kTime(bar));
         const effectiveStop = effectiveStopFor(p);
         if(p.side==='short' ? high>=effectiveStop : low<=effectiveStop){
@@ -1625,11 +1700,13 @@ async function refreshMarks(){
     state.positions.forEach((p, i) => {
       const price = prices[i];
       if(!price || !Number.isFinite(price)){ stillOpen.push(p); return; }
+      ensurePositionEvents(p);
       p.last = price;
       if(price > (p.highest || 0)) p.highest = price;
       if(price < (p.lowest || Infinity)) p.lowest = price;
       changed = true;
       if(state.running){
+        recordProtectionEvents(p, nowMs());
         takeBreakEvenPartial(p, nowMs());
         const effectiveStop = effectiveStopFor(p);
         const exitReason = stopReasonFor(p);
@@ -1678,6 +1755,71 @@ function tradeExitSummary(trade){
     averageExit,
     legs:legs.map(exit => ({ ...exit, sharePct:accountedQty > 0 ? exit.qty / accountedQty * 100 : 0 })),
   };
+}
+function synthesizePositionEvents(item, isClosed=false){
+  if(Array.isArray(item?.events) && item.events.length) return item.events.map(event => ({ ...event }));
+  const events = [{
+    id:`${item?.id || item?.symbol}_open_${item?.entryTime}`,
+    type:'open',
+    time:Number(item?.entryTime || 0),
+    price:Number(item?.entry || 0),
+    qtyDelta:Number(item?.qty || 0),
+    remainingQty:Number(item?.qty || 0),
+    stop:Number(item?.originalStop || item?.stop || 0),
+    pnl:0,
+    reason:'',
+    note:'reconstructed',
+  }];
+  let remainingQty = Number(item?.qty || 0);
+  let partialPnl = 0;
+  for(const partial of [...(item?.partialExits || [])].sort((a,b) => Number(a.exitTime || 0) - Number(b.exitTime || 0))){
+    const qty = Math.max(0, Number(partial.qty || 0));
+    remainingQty = Math.max(0, remainingQty - qty);
+    partialPnl += Number(partial.pnl || 0);
+    events.push({
+      id:`${item?.id || item?.symbol}_${partial.type}_${partial.exitTime}`,
+      type:partial.type === 'tp1' ? 'tp1' : 'partial_exit',
+      time:Number(partial.exitTime || 0),
+      price:Number(partial.exit || 0),
+      qtyDelta:-qty,
+      remainingQty,
+      stop:Number(item?.entry || 0),
+      pnl:Number(partial.pnl || 0),
+      reason:'',
+      note:'reconstructed',
+    });
+  }
+  if(isClosed){
+    events.push({
+      id:`${item?.id || item?.symbol}_close_${item?.exitTime}`,
+      type:'close',
+      time:Number(item?.exitTime || 0),
+      price:Number(item?.exit || 0),
+      qtyDelta:-remainingQty,
+      remainingQty:0,
+      stop:Number(item?.exit || 0),
+      pnl:Number(item?.pnl || 0) - partialPnl,
+      reason:item?.reason || '',
+      note:'reconstructed',
+    });
+  }
+  return events;
+}
+function buildPositionActivity(positions, trades, limit=200){
+  const records = [];
+  for(const position of positions || []){
+    for(const event of synthesizePositionEvents(position, false)){
+      records.push({ ...event, symbol:position.symbol, marketProvider:position.marketProvider, side:position.side || 'long' });
+    }
+  }
+  for(const trade of trades || []){
+    for(const event of synthesizePositionEvents(trade, true)){
+      records.push({ ...event, symbol:trade.symbol, marketProvider:trade.marketProvider, side:trade.side || 'long' });
+    }
+  }
+  return records
+    .sort((a,b) => Number(b.time || 0) - Number(a.time || 0))
+    .slice(0, limit);
 }
 function statsFromTrades(trades){
   let gp = 0, gl = 0, wins = 0, r = 0, pnl = 0;
@@ -2169,6 +2311,26 @@ function paintAll(){
     return `<tr><td class="sym">${symLink(p.symbol, p.marketProvider)}</td><td class="left">${htmlEscape(strategyName(p))}</td><td>${sideCell}</td><td>${fmt(p.entry,8)}</td><td>${lastCell}</td><td>${pctCell}</td><td>${pnlCell}</td><td>${stopCell}</td><td>${tp1Cell}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.remainingQty,4)}</td><td>${fmt(p.riskUsdt,2)}</td><td>${fmt(p.score,0)}</td><td>${tw(p.entryTime)}</td><td class="reason">${htmlEscape((p.reasons||[]).slice(0,3).join(' · '))}</td></tr>`;
   }).join('') : '<tr><td class="sym muted" colspan="15">No open position</td></tr>';
 
+  const activity = buildPositionActivity(state.positions || [], state.trades || []);
+  document.getElementById('activitySummary').textContent = activity.length
+    ? `${activity.length} events · latest ${tw(activity[0].time)}`
+    : 'No activity';
+  document.getElementById('activityBody').innerHTML = activity.length ? activity.map(event => {
+    const qty = Number(event.qtyDelta || 0);
+    const qtyCell = qty
+      ? `<span class="${qty > 0 ? 'pos' : 'neg'}">${qty > 0 ? '+' : ''}${fmt(qty,4)}</span>`
+      : '<span class="muted">—</span>';
+    const showEventPnl = ['partial_exit','tp1','close'].includes(event.type);
+    const pnlCell = showEventPnl
+      ? `<span class="${signedClass(event.pnl)}">${fmt(event.pnl,2)}</span>`
+      : '<span class="muted">—</span>';
+    const notes = [
+      event.reason ? (REASON_LABELS[event.reason] || event.reason) : '',
+      event.note === 'reconstructed' ? '歷史資料重建' : '',
+    ].filter(Boolean).join(' · ');
+    return `<tr><td class="sym">${symLink(event.symbol, event.marketProvider)}</td><td>${tw(event.time)}</td><td class="left">${htmlEscape(POSITION_EVENT_LABELS[event.type] || event.type)}</td><td>${qtyCell}</td><td>${event.price ? fmt(event.price,8) : '—'}</td><td>${fmt(event.remainingQty,4)}</td><td>${event.stop ? fmt(event.stop,8) : '—'}</td><td>${pnlCell}</td><td class="left muted">${htmlEscape(notes || '—')}</td></tr>`;
+  }).join('') : '<tr><td class="sym muted" colspan="9">No position activity</td></tr>';
+
   const tradeStrategyFilter = document.getElementById('tradeStrategyFilter')?.value || '';
   const tradeSideFilter = document.getElementById('tradeSideFilter')?.value || '';
   const visibleTrades = (state.trades || []).filter(t =>
@@ -2195,6 +2357,7 @@ function paintAll(){
   updateStatusLine(state.running ? `Paper running · ${state.positions.length} open · ${tw(nowMs())}` : `Paper stopped · ${tw(nowMs())}`);
   updatePaperAction();
 }
+const POSITION_EVENT_LABELS = { open:'開倉', early_protection:'早期保護啟用', partial_exit:'分批減倉', lock_protection:'鎖利啟用', tp1:'TP1 減倉', close:'最終平倉' };
 const REASON_LABELS = { stop:'止損', be_stop:'保本出場', early_stop:'早期保護', lock_stop:'鎖利出場', trail_stop:'移動停利', tp1:'TP1 出場', time_exit:'到期出場' };
 function buildBreakdown(trades, keyFn){
   const map = {};

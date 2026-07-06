@@ -54,7 +54,7 @@
   - 策略（雙實作區）：`evaluateSignal`、`scanSignals`、`buildRisk`⋯（見上表）
   - 回測：`simulateTrade`、`summarize`、`applyPortfolio`、`runBacktest`
   - 本地紙上交易：`startPaper`、`paperTick`、`updatePositions`
-  - 渲染：`refreshMarks`、`drawSpark`、`metric`、`statsFromTrades`
+  - 渲染：`refreshMarks`、`drawSpark`、`metric`、`statsFromTrades`、`buildPositionActivity`（倉位活動紀錄；舊交易由 entry / partialExits / close 重建）
   - PnL 分析頁：`buildPnlModel`、`setDashboardPage`、`setPnlRange`、`pnl*` 系列
 - 有多條 500–900 字元長行（L155、L1255、L1828 附近）。`Edit` 比對失敗時改用短而獨特的錨點字串。
 
@@ -66,7 +66,7 @@
   - POST `/start`、`/stop`、`/reset`、`/config`、`/scan`、`/tick`、`/notify/test`
 - `runPaperTick`（cron 主流程）→ `scanSignals` → `openNewPositions` / `updatePositions`
 - 掃描預算邏輯：`scanUniverse`、`rankedInstruments`、`normalizeOkxTickers`、`normalizeGateTickers`、`deriveGateVolumeRatio`、`anomalyScore`、`buildTickerSnapshot`、`rotatingSlice`（OKX 優先、Gate-only 補充；Gate 門檻按共同標的成交量中位比例調整且不低於 5M；anomaly-first；兩交易所合計每次掃描 K-line 上限 28 次、候選上限 20、核心標的每 30 分鐘輪掃）
-- 狀態：`loadState`/`saveState`/`normalizeState`/`applyConfig`（KV）
+- 狀態：`loadState`/`saveState`/`normalizeState`/`applyConfig`（KV）；每筆 position 的 `events` 記錄開倉、保護升級、分批、TP1、平倉，沿用既有 state write
 - 通知：`notifyNewPosition` → Queue（`queuePositionNotification`）；`handleNotificationQueue`/`handleNotificationDeadLetters`；KV pending 是 fallback（`flushPendingNotifications`）
 - 策略（雙實作區）：`evaluateSignal`、`buildRisk`⋯（見上表）
 
