@@ -40,11 +40,16 @@ function loadSnapshotRanker(source) {
   );
 }
 
+function loadFailureReason(source) {
+  return new Function(`return (${extractFunction(source, 'scanFailureReason')});`)();
+}
+
 const workerSource = readFileSync('worker/src/index.js', 'utf8');
 const htmlSource = readFileSync('momentum_trader_claude.html', 'utf8');
 const workerMerge = loadMerger(workerSource);
 const htmlMerge = loadMerger(htmlSource);
 const snapshotRanker = loadSnapshotRanker(workerSource);
+const failureReason = loadFailureReason(workerSource);
 const now = 10_000_000;
 
 const recent = {
@@ -133,8 +138,13 @@ assert.match(workerSource, /successfulScanCount/);
 assert.match(workerSource, /failedScanCount/);
 assert.match(workerSource, /scanRequestDelayMs: 500/);
 assert.match(workerSource, /universeSource = 'cached'/);
+assert.match(workerSource, /\/api\/v5\/market\/history-candles/);
+assert.match(workerSource, /history-candles'.+0, 0\)/);
 assert.match(htmlSource, /掃描失敗 · \$\{state\.lastError\}/);
 assert.match(htmlSource, /Universe使用快取/);
+assert.equal(failureReason(new Error('OKX /api/v5/market/history-candles 429')), 'okx_rate_limit');
+assert.equal(failureReason(new Error('Too many subrequests by single Worker invocation.')), 'worker_subrequest_limit');
+assert.equal(failureReason(new Error('network unavailable')), 'other');
 
 const snapshot = {
   savedAt: now - 5 * 60 * 1000,
@@ -148,4 +158,4 @@ assert.equal(cachedRanked.length, 1);
 assert.equal(cachedRanked[0].symbol, 'BTCUSDT');
 assert.deepEqual(snapshotRanker({ ...snapshot, savedAt: now - TTL_MS - 1 }, { minQuoteVolume: 20000000 }, now), []);
 
-console.log(`recent signal checks passed (${cases.length} merge cases, cached-universe fallback, Worker/dashboard parity)`);
+console.log(`recent signal checks passed (${cases.length} merge cases, cached-universe fallback, bounded K-line subrequests, Worker/dashboard parity)`);

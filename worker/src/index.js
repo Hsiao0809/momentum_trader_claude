@@ -390,6 +390,7 @@ async function scanSignals(state) {
   let successfulScanCount = 0;
   let failedScanCount = 0;
   const failedSymbols = [];
+  const failedReasonCounts = {};
 
   for (const ticker of tickers) {
     try {
@@ -400,6 +401,8 @@ async function scanSignals(state) {
     } catch (error) {
       failedScanCount++;
       if (failedSymbols.length < 8) failedSymbols.push(ticker.symbol);
+      const reason = scanFailureReason(error);
+      failedReasonCounts[reason] = Number(failedReasonCounts[reason] || 0) + 1;
       console.warn('scan failed', ticker.instId, error);
     }
     await sleep(positiveInt(cfg.scanRequestDelayMs, DEFAULT_CFG.scanRequestDelayMs));
@@ -413,6 +416,7 @@ async function scanSignals(state) {
     successfulScanCount,
     failedScanCount,
     failedSymbols,
+    failedReasonCounts,
     btcContextOk,
     signalCount: signals.length,
   };
@@ -653,14 +657,16 @@ async function currentPrices(state) {
 }
 
 async function klines(instId, interval = '15m', limit = 130) {
-  const rows = await okx('/api/v5/market/candles', { instId, bar: interval, limit });
+  // Keep K-line scans to one subrequest each. Retrying dozens of rate-limited
+  // symbols in the same invocation can exceed Cloudflare's subrequest cap.
+  const rows = await okx('/api/v5/market/history-candles', { instId, bar: interval, limit }, 0, 0);
   return rows
     .map((row) => [Number(row[0]), Number(row[1]), Number(row[2]), Number(row[3]), Number(row[4]), Number(row[5])])
     .filter((row) => row.every((value) => Number.isFinite(value)))
     .sort((a, b) => a[0] - b[0]);
 }
 
-async function okx(path, params = {}, attempt = 0) {
+async function okx(path, params = {}, attempt = 0, maxRetries = 2) {
   const url = new URL(path, OKX_API);
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null) url.searchParams.set(key, value);
@@ -672,14 +678,21 @@ async function okx(path, params = {}, attempt = 0) {
     },
     cf: { cacheTtl: 0 },
   });
-  if ((response.status === 429 || response.status >= 500) && attempt < 2) {
+  if ((response.status === 429 || response.status >= 500) && attempt < maxRetries) {
     await sleep(500 * (attempt + 1));
-    return okx(path, params, attempt + 1);
+    return okx(path, params, attempt + 1, maxRetries);
   }
   if (!response.ok) throw new Error(`OKX ${path} ${response.status}`);
   const payload = await response.json();
   if (payload.code && payload.code !== '0') throw new Error(`OKX ${path} ${payload.code}: ${payload.msg}`);
   return payload.data || [];
+}
+
+function scanFailureReason(error) {
+  const message = String(error?.message || error || '');
+  if (message.includes('429') || message.includes('50011')) return 'okx_rate_limit';
+  if (message.includes('Too many subrequests')) return 'worker_subrequest_limit';
+  return 'other';
 }
 
 function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, cfg) {
