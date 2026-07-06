@@ -8,7 +8,7 @@
     "dev": "npm run build && npx wrangler pages dev dist",
     "deploy": "npm run build && npx wrangler pages deploy dist --project-name momentum-trader-claude",
     "worker:deploy": "npx wrangler deploy --config worker/wrangler.toml",
-    "worker:tail": "npx wrangler tail momentum-trader-claude-runner",
+    "worker:tail": "npx wrangler tail momentum-trader-claude-runner --config worker/wrangler.toml",
     "deploy:all": "npm run worker:deploy && npm run deploy"
   }
 }
