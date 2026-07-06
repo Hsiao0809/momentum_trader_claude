@@ -103,6 +103,7 @@
     .pill.live{color:var(--accent);border-color:rgba(217,119,87,.45);background:var(--accent-soft)}
     .pill.high{color:var(--green);border-color:rgba(123,174,113,.45);background:rgba(123,174,113,.08)}
     .signal-recency{display:inline-block;margin-left:5px;color:var(--muted);font-size:9px;font-weight:600;vertical-align:middle}
+    .market-tag{display:inline-block;margin-left:5px;color:var(--muted);font-size:9px;font-weight:700;vertical-align:middle;text-transform:uppercase}
     tr.recent-signal td{opacity:.72}
     tr.recent-signal:hover td{opacity:1}
     .reason{max-width:420px;overflow:hidden;text-overflow:ellipsis;text-align:left;color:var(--muted)}
@@ -456,8 +457,8 @@ function twFull(ms){
   if(!ms) return '';
   return new Date(ms).toLocaleString('zh-TW', { timeZone:TZ, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
 }
-function tvHref(sym){
-  const exchange = state?.marketProvider === 'okx-usdt-swap' ? 'OKX' : 'BINANCE';
+function tvHref(sym, provider=''){
+  const exchange = provider === 'gate' ? 'GATEIO' : (provider === 'okx' || SERVER_MODE ? 'OKX' : 'BINANCE');
   return `https://www.tradingview.com/chart/?symbol=${exchange}:${encodeURIComponent(sym)}.P`;
 }
 function fmt(n, d=4){ return n === null || n === undefined || n === '' ? '' : Number(n).toLocaleString(undefined, {maximumFractionDigits:d}); }
@@ -1649,7 +1650,11 @@ function signedClass(v){ return !Number.isFinite(Number(v)) ? '' : Number(v) >= 
 function showPct(v,d=2){ return Number.isFinite(Number(v)) ? `${fmt(v,d)}%` : '-'; }
 function metric(id, value, klass=''){ const el = document.getElementById(id); if(el){ el.textContent = value; el.className = `v ${klass}`.trim(); } }
 function strategyName(item){ return LABELS[item?.strategyKey] || item?.strategyLabel || item?.strategyKey || ''; }
-function symLink(sym){ return `<a class="sym-link" href="${tvHref(sym)}" target="_blank" rel="noopener noreferrer" title="Open ${htmlEscape(sym)} on TradingView"><strong>${htmlEscape(sym)}</strong></a>`; }
+function symLink(sym, provider=''){
+  const source = provider === 'gate' ? 'Gate' : provider === 'okx' ? 'OKX' : '';
+  const tag = source ? `<span class="market-tag">${source}</span>` : '';
+  return `<a class="sym-link" href="${tvHref(sym, provider)}" target="_blank" rel="noopener noreferrer" title="Open ${htmlEscape(sym)} on TradingView"><strong>${htmlEscape(sym)}</strong></a>${tag}`;
+}
 function statsFromTrades(trades){
   let gp = 0, gl = 0, wins = 0, r = 0, pnl = 0;
   trades.forEach(t => { const p = Number(t.pnl || 0), rr = Number(t.rMultiple || 0); pnl += p; r += rr; if(p >= 0){ gp += p; wins++; } else gl += Math.abs(p); });
@@ -2059,15 +2064,21 @@ function paintAll(){
     const reasonCounts = meta.failedReasonCounts || {};
     const reasonHealth = [
       reasonCounts.okx_rate_limit ? `429 ${reasonCounts.okx_rate_limit}` : '',
+      reasonCounts.gate_rate_limit ? `Gate 429 ${reasonCounts.gate_rate_limit}` : '',
       reasonCounts.worker_subrequest_limit ? `子請求上限 ${reasonCounts.worker_subrequest_limit}` : '',
       reasonCounts.other ? `其他 ${reasonCounts.other}` : '',
     ].filter(Boolean).join(' / ');
+    const providers = meta.providerMeta || {};
+    const gateHealth = Number.isFinite(Number(providers.gateExclusive))
+      ? ` · Gate獨有 ${providers.gateExclusive}（門檻 ${fmt(Number(providers.gateMinQuoteVolume || 0) / 1000000, 1)}M）`
+      : '';
+    const providerError = providers.okxError || providers.gateError ? ' · 行情來源部分失敗' : '';
     const btcHealth = meta.btcContextOk === false ? ' · BTC資料失敗' : '';
     const universeHealth = meta.universeSource === 'cached' ? ' · Universe使用快取' : '';
-    const degraded = Number(meta.failedScanCount || 0) > 0 || meta.btcContextOk === false || meta.universeSource === 'cached';
+    const degraded = Number(meta.failedScanCount || 0) > 0 || meta.btcContextOk === false || meta.universeSource !== 'live';
     signalSummary.textContent = state.lastError
       ? `掃描失敗 · ${state.lastError} · 上次成功 ${state.lastScanAt ? tw(state.lastScanAt) : '尚未'}`
-      : `本輪 ${currentSignals.length} · 近30分 ${candidateSignals.length}${health}${reasonHealth ? ` · ${reasonHealth}` : ''}${btcHealth}${universeHealth} · 掃描 ${state.lastScanAt ? tw(state.lastScanAt) : '尚未'}`;
+      : `本輪 ${currentSignals.length} · 近30分 ${candidateSignals.length}${health}${gateHealth}${reasonHealth ? ` · ${reasonHealth}` : ''}${providerError}${btcHealth}${universeHealth} · 掃描 ${state.lastScanAt ? tw(state.lastScanAt) : '尚未'}`;
     signalSummary.style.color = state.lastError ? 'var(--red)' : degraded ? 'var(--accent)' : '';
   }
   const priceStatus = document.getElementById('priceStatus');
@@ -2102,7 +2113,7 @@ function paintAll(){
     const lastPriceCell = lastP ? fmt(lastP,8) : '<span class="muted">—</span>';
     const deltaCell = delta !== null ? `<span class="${signedClass(delta)}">${showPct(delta)}</span>` : '<span class="muted">—</span>';
     const sideCell = (s.side || sideForStrategy(s.strategyKey)) === 'short' ? '<span class="neg" style="font-weight:600">空</span>' : '<span class="pos" style="font-weight:600">多</span>';
-    return `<tr class="${isCurrent ? '' : 'recent-signal'}"><td class="sym">${symLink(s.symbol)}${recency}</td><td><span class="${scoreClass}">${fmt(s.score,0)}</span></td><td class="left">${htmlEscape(strategyName(s))}</td><td>${sideCell}</td><td>${fmt(s.entry,8)}</td><td>${lastPriceCell}</td><td>${deltaCell}</td><td class="neg">${fmt(s.stop,8)}</td><td class="pos">${fmt(s.tp1,8)}</td><td>${showPct(s.trailPct)}</td><td class="${signedClass(m.momentum1h)}">${showPct(m.momentum1h)}</td><td class="${signedClass(m.momentum4h)}">${showPct(m.momentum4h)}</td><td class="${signedClass(m.momentum24h)}">${showPct(m.momentum24h)}</td><td>${showPct((m.position24h || 0) * 100)}</td><td>${fmt(m.volumeRatio,2)}x</td><td class="reason">${htmlEscape((s.reasons||[]).slice(0,4).join(' · '))}</td></tr>`;
+    return `<tr class="${isCurrent ? '' : 'recent-signal'}"><td class="sym">${symLink(s.symbol, s.marketProvider)}${recency}</td><td><span class="${scoreClass}">${fmt(s.score,0)}</span></td><td class="left">${htmlEscape(strategyName(s))}</td><td>${sideCell}</td><td>${fmt(s.entry,8)}</td><td>${lastPriceCell}</td><td>${deltaCell}</td><td class="neg">${fmt(s.stop,8)}</td><td class="pos">${fmt(s.tp1,8)}</td><td>${showPct(s.trailPct)}</td><td class="${signedClass(m.momentum1h)}">${showPct(m.momentum1h)}</td><td class="${signedClass(m.momentum4h)}">${showPct(m.momentum4h)}</td><td class="${signedClass(m.momentum24h)}">${showPct(m.momentum24h)}</td><td>${showPct((m.position24h || 0) * 100)}</td><td>${fmt(m.volumeRatio,2)}x</td><td class="reason">${htmlEscape((s.reasons||[]).slice(0,4).join(' · '))}</td></tr>`;
   }).join('') : '<tr><td class="sym muted" colspan="16">近 30 分鐘沒有候選訊號</td></tr>';
 
   document.getElementById('backtestSummary').innerHTML = bt ? `Trades ${bt.summary.tradeCount} · Win ${fmt(bt.summary.winRatePct,2)}% · PF ${fmt(bt.summary.profitFactor,2)} · Return ${fmt(bt.summary.netReturnPct,2)}% · Max DD ${fmt(bt.summary.maxDrawdownPct,2)}% · ${tw(bt.runAt)}` : 'No run yet';
@@ -2131,7 +2142,7 @@ function paintAll(){
       ? `<span class="pos">✓ ${fmt(p.tp1,8)}</span>`
       : `<span class="muted">${fmt(p.tp1,8)}</span>`;
     const sideCell = (p.side||'long')==='long' ? `<span class="pos" style="font-weight:600">多</span>` : `<span class="neg" style="font-weight:600">空</span>`;
-    return `<tr><td class="sym">${symLink(p.symbol)}</td><td class="left">${htmlEscape(strategyName(p))}</td><td>${sideCell}</td><td>${fmt(p.entry,8)}</td><td>${lastCell}</td><td>${pctCell}</td><td>${pnlCell}</td><td>${stopCell}</td><td>${tp1Cell}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.remainingQty,4)}</td><td>${fmt(p.riskUsdt,2)}</td><td>${fmt(p.score,0)}</td><td>${tw(p.entryTime)}</td><td class="reason">${htmlEscape((p.reasons||[]).slice(0,3).join(' · '))}</td></tr>`;
+    return `<tr><td class="sym">${symLink(p.symbol, p.marketProvider)}</td><td class="left">${htmlEscape(strategyName(p))}</td><td>${sideCell}</td><td>${fmt(p.entry,8)}</td><td>${lastCell}</td><td>${pctCell}</td><td>${pnlCell}</td><td>${stopCell}</td><td>${tp1Cell}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.remainingQty,4)}</td><td>${fmt(p.riskUsdt,2)}</td><td>${fmt(p.score,0)}</td><td>${tw(p.entryTime)}</td><td class="reason">${htmlEscape((p.reasons||[]).slice(0,3).join(' · '))}</td></tr>`;
   }).join('') : '<tr><td class="sym muted" colspan="15">No open position</td></tr>';
 
   const tradeStrategyFilter = document.getElementById('tradeStrategyFilter')?.value || '';
@@ -2146,7 +2157,7 @@ function paintAll(){
   document.getElementById('tradesBody').innerHTML = visibleTrades.length ? visibleTrades.slice(0,100).map(t => {
     const holdH = (t.exitTime && t.entryTime) ? fmt((t.exitTime - t.entryTime) / 3600000, 1) : '—';
     const sideLabel = (t.side || 'long') === 'short' ? '<span class="neg" style="font-weight:600">空</span>' : '<span class="pos" style="font-weight:600">多</span>';
-    return `<tr><td class="sym">${symLink(t.symbol)}</td><td class="left">${htmlEscape(strategyName(t))}</td><td>${sideLabel}</td><td>${fmt(t.entry,8)}</td><td>${fmt(t.exit,8)}</td><td class="${signedClass(t.rMultiple)}">${fmt(t.rMultiple,2)}</td><td class="${signedClass(t.pnl)}">${fmt(t.pnl,2)}</td><td class="pos">${showPct(t.mfePct)}</td><td class="neg">${showPct(t.maePct)}</td><td>${fmt(t.score,0)}</td><td>${holdH}h</td><td>${tw(t.entryTime)}</td><td>${tw(t.exitTime)}</td><td class="left">${htmlEscape(t.reason)}</td></tr>`;
+    return `<tr><td class="sym">${symLink(t.symbol, t.marketProvider)}</td><td class="left">${htmlEscape(strategyName(t))}</td><td>${sideLabel}</td><td>${fmt(t.entry,8)}</td><td>${fmt(t.exit,8)}</td><td class="${signedClass(t.rMultiple)}">${fmt(t.rMultiple,2)}</td><td class="${signedClass(t.pnl)}">${fmt(t.pnl,2)}</td><td class="pos">${showPct(t.mfePct)}</td><td class="neg">${showPct(t.maePct)}</td><td>${fmt(t.score,0)}</td><td>${holdH}h</td><td>${tw(t.entryTime)}</td><td>${tw(t.exitTime)}</td><td class="left">${htmlEscape(t.reason)}</td></tr>`;
   }).join('') : `<tr><td class="sym muted" colspan="14">${state.trades.length ? 'No matching trades' : 'No closed paper trade'}</td></tr>`;
   paintPnl();
   paintReview();

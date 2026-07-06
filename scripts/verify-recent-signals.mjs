@@ -33,10 +33,16 @@ function loadSnapshotRanker(source) {
   return new Function(
     'TICKER_SNAPSHOT_MAX_AGE_MS',
     'symbolFromInstId',
+    'providerFromInstId',
+    'GATE_MIN_QUOTE_VOLUME',
     `return (${functionSource});`,
   )(
     TTL_MS,
-    (instId) => instId.replace('-USDT-SWAP', 'USDT').replaceAll('-', ''),
+    (instId) => instId.endsWith('_USDT')
+      ? instId.slice(0, -5).replaceAll('_', '') + 'USDT'
+      : instId.replace('-USDT-SWAP', 'USDT').replaceAll('-', ''),
+    (instId) => instId.endsWith('_USDT') ? 'gate' : 'okx',
+    5_000_000,
   );
 }
 
@@ -143,6 +149,7 @@ assert.match(workerSource, /history-candles'.+0, 0\)/);
 assert.match(htmlSource, /掃描失敗 · \$\{state\.lastError\}/);
 assert.match(htmlSource, /Universe使用快取/);
 assert.equal(failureReason(new Error('OKX /api/v5/market/history-candles 429')), 'okx_rate_limit');
+assert.equal(failureReason(new Error('Gate /api/v4/futures/usdt/candlesticks 429')), 'gate_rate_limit');
 assert.equal(failureReason(new Error('Too many subrequests by single Worker invocation.')), 'worker_subrequest_limit');
 assert.equal(failureReason(new Error('network unavailable')), 'other');
 

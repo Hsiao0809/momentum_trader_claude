@@ -9,7 +9,7 @@
 | 面 | 檔案 | 資料源 | 執行方式 |
 |---|---|---|---|
 | Dashboard（UI + 獨立模式） | `momentum_trader_claude.html` | Binance Futures（瀏覽器直連） | 使用者開網頁 |
-| 24/7 Runner | `worker/src/index.js` | OKX USDT 永續（Binance 擋 Workers，403） | Cloudflare cron，每 5 分鐘 |
+| 24/7 Runner | `worker/src/index.js` | OKX + Gate USDT 永續（Binance 擋 Workers，403） | Cloudflare cron，每 5 分鐘 |
 
 - 部署：Cloudflare Pages（前端）+ Cloudflare Workers（runner）。Runner 線上網址：`https://momentum-trader-claude-runner.siaosiao1016.workers.dev`
 - 狀態存 Cloudflare KV（binding `PAPER_STATE`）；開倉通知走 Cloudflare Queue `momentum-trader-notifications`（+ DLQ）。
@@ -29,7 +29,7 @@
 
 ## ⚠️ 雙實作對照表（本 repo 第一大坑）
 
-以下函式在 **兩個檔案各有一份**，同名不同源（HTML 吃 Binance K 線格式、worker 吃 OKX）。改策略邏輯時，先在兩檔各 grep 一次，決定改一邊還是兩邊，並在回覆中明說理由：
+以下函式在 **兩個檔案各有一份**，同名不同源（HTML 吃 Binance K 線格式、worker 吃正規化後的 OKX/Gate K 線）。改策略邏輯時，先在兩檔各 grep 一次，決定改一邊還是兩邊，並在回覆中明說理由：
 
 `evaluateSignal`、`scanSignals`、`buildRisk`、`effectiveStopFor`、`stopReasonFor`、`positionSize`、`closePosition`、`takeBreakEvenPartial`、`takeTP1`、`updatePositions`、`atrPct`、`btcRiskOff`、`strategyKey`、`sideForStrategy`、`closedKlines`、`rangePosition`、`kHigh`/`kLow`/`kClose`/`kVol`/`kTime`、`ema`/`mean`/`median`、`pct`/`safeDiv`/`clamp`
 
@@ -60,12 +60,12 @@
 
 ## worker/src/index.js（約 1150 行）
 
-- L1–68：常數（`STATE_KEY`、`OKX_API`、`DEFAULT_CFG`、`STRATEGY_SIDES`、`CORS_HEADERS`）
+- L1–70：常數（`STATE_KEY`、`OKX_API`、`GATE_API`、`DEFAULT_CFG`、`STRATEGY_SIDES`、`CORS_HEADERS`）
 - `handleRequest`（L70 起）HTTP API：
   - GET `/`（健康）、`/state`、`/prices`、`/snapshot`
   - POST `/start`、`/stop`、`/reset`、`/config`、`/scan`、`/tick`、`/notify/test`
 - `runPaperTick`（cron 主流程）→ `scanSignals` → `openNewPositions` / `updatePositions`
-- 掃描預算邏輯：`scanUniverse`、`rankedInstruments`、`anomalyScore`、`buildTickerSnapshot`、`rotatingSlice`（anomaly-first，每次掃描 K-line 上限 28 次、候選上限 20、核心標的每 30 分鐘輪掃）
+- 掃描預算邏輯：`scanUniverse`、`rankedInstruments`、`normalizeOkxTickers`、`normalizeGateTickers`、`deriveGateVolumeRatio`、`anomalyScore`、`buildTickerSnapshot`、`rotatingSlice`（OKX 優先、Gate-only 補充；Gate 門檻按共同標的成交量中位比例調整且不低於 5M；anomaly-first；兩交易所合計每次掃描 K-line 上限 28 次、候選上限 20、核心標的每 30 分鐘輪掃）
 - 狀態：`loadState`/`saveState`/`normalizeState`/`applyConfig`（KV）
 - 通知：`notifyNewPosition` → Queue（`queuePositionNotification`）；`handleNotificationQueue`/`handleNotificationDeadLetters`；KV pending 是 fallback（`flushPendingNotifications`）
 - 策略（雙實作區）：`evaluateSignal`、`buildRisk`⋯（見上表）
@@ -76,5 +76,5 @@
    **「動到 tick/掃描/KV 路徑」的機械判準**：你的 diff 是否改變了每次 tick 的外部 fetch 次數或 KV write 次數？是 → 逐條核對本節；否（純計算邏輯、UI、文案）→ 不需。
 2. **掃描預算**：每次掃描 K-line ≤ 28 次。→ 不要加不設上限的迴圈 fetch。
 3. **Subrequest 上限**：通知走 Queue 就是為了避開掃描路徑的 subrequest 限制。→ 不要把通知改回掃描時同步直發。
-4. **Worker 端禁用 Binance**（403）。瀏覽器端才能用 Binance。
+4. **Worker 端禁用 Binance**（403）。Worker 使用 OKX + Gate，瀏覽器獨立模式才能用 Binance。
 5. **策略行為改動**（停損/停利/分批/開倉條件）屬於使用者的交易決策 → 除非使用者明確要求，不要「順手優化」。
