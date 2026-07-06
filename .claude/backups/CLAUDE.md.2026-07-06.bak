@@ -27,7 +27,6 @@
 | 不確定「算不算完成 / 該不該問 / 該不該換路 / 該不該升級模型」 | `.claude/docs/30-JUDGMENT.md` |
 | 要寫派工 prompt | `.claude/docs/40-TEMPLATES.md`（複製填空） |
 | 要更新這些制度檔、踩坑後記教訓 | `.claude/docs/50-MAINTENANCE.md` + `LESSONS.md` |
-| 要評估/調整策略參數與邏輯、判斷改動好不好 | `.claude/docs/70-STRATEGY-PLAYBOOK.md`（含 `scripts/backtest-strategies.mjs` 回測工具用法） |
 | session 開始、想知道環境背景與前人交接 | `.claude/docs/60-LETTER.md` |
 | 想知道這些規則的依據 | `.claude/docs/00-DIAGNOSIS.md` |
 
