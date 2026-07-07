@@ -445,8 +445,8 @@ const STRATEGY_SIDES = {
 const CFG = {
   initialEquity: 1000,
   riskPerTrade: 0.01,
-  maxPositions: 5,
-  maxTotalRisk: 0.05,
+  maxPositions: 8,
+  maxTotalRisk: 0.08,
   minQuoteVolume: 20000000,
   minSignalScore: 70,
   paperMinScore: 82,
@@ -1380,6 +1380,7 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
         reason=tp1Done?'trail_stop':lowest<=risk.lockTrigger?'lock_stop':lowest<=risk.beTrigger?'be_stop':'stop'; break;
       }
       if(!tp1Done && low <= risk.tp1){ const sq=remainingQty*0.5; realized+=sq*(entry-risk.tp1); remainingQty-=sq; tp1Done=true; }
+      if(i - entryIndex >= 96 && close > entry * 0.99 && !tp1Done && !bePartialDone){ exit=close; exitTime=kTime(bar); realized+=remainingQty*(entry-exit); reason='stale_exit'; break; }
       if(i===lastIndex){ exit=close; exitTime=kTime(bar); realized+=remainingQty*(entry-exit); }
     } else {
       mfe = Math.max(mfe, pct(entry, high) || 0);
@@ -1400,6 +1401,7 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
         reason=tp1Done?'trail_stop':highest>=risk.lockTrigger?'lock_stop':highest>=risk.beTrigger?'be_stop':(earlyTrigger&&highest>=earlyTrigger)?'early_stop':'stop'; break;
       }
       if(!tp1Done && high >= risk.tp1){ const sq=remainingQty*0.5; realized+=sq*(risk.tp1-entry); remainingQty-=sq; tp1Done=true; }
+      if(i - entryIndex >= 96 && close < entry * 1.01 && !tp1Done && !bePartialDone){ exit=close; exitTime=kTime(bar); realized+=remainingQty*(exit-entry); reason='stale_exit'; break; }
       if(i===lastIndex){ exit=close; exitTime=kTime(bar); realized+=remainingQty*(exit-entry); }
     }
   }
@@ -1667,6 +1669,12 @@ async function updatePositions(){
         if(!p.tp1Done && (p.side==='short' ? low<=p.tp1 : high>=p.tp1)){
           takeTP1(p, kTime(bar));
         }
+        // 呆倉踢除：持有 24h 仍未達 +1% 且未觸發任何保護層 → 出場讓位給新訊號
+        const staleProfit = p.side==='short' ? (p.entry-close)/p.entry : (close-p.entry)/p.entry;
+        if(kTime(bar) >= p.entryTime + 24*60*60*1000 && staleProfit < 0.01 && !p.tp1Done && !p.bePartialDone){
+          closePosition(p, close, 'stale_exit', kTime(bar));
+          closed = true; break;
+        }
         if(kTime(bar) >= p.entryTime + CFG.maxHoldHours*60*60*1000){
           closePosition(p, close, 'time_exit', kTime(bar));
           closed = true; break;
@@ -1718,7 +1726,7 @@ async function refreshMarks(){
         const exitReason = stopReasonFor(p);
         if(p.side==='short' ? price>=effectiveStop : price<=effectiveStop){
           closePosition(p, effectiveStop, exitReason, nowMs());
-          const reasonLabel = {stop:'止損',be_stop:'保本出場',early_stop:'早期保護',lock_stop:'鎖利出場',trail_stop:'移動停利'}[exitReason] || exitReason;
+          const reasonLabel = {stop:'止損',be_stop:'保本出場',early_stop:'早期保護',lock_stop:'鎖利出場',trail_stop:'移動停利',stale_exit:'呆倉出場'}[exitReason] || exitReason;
           log(`即時出場 · ${p.symbol} @ ${fmt(effectiveStop,8)} (${reasonLabel})`);
           return;
         }
@@ -2368,7 +2376,7 @@ function paintAll(){
   updatePaperAction();
 }
 const POSITION_EVENT_LABELS = { open:'開倉', early_protection:'早期保護啟用', partial_exit:'分批減倉', lock_protection:'鎖利啟用', tp1:'TP1 減倉', close:'最終平倉' };
-const REASON_LABELS = { stop:'止損', be_stop:'保本出場', early_stop:'早期保護', lock_stop:'鎖利出場', trail_stop:'移動停利', tp1:'TP1 出場', time_exit:'到期出場' };
+const REASON_LABELS = { stop:'止損', be_stop:'保本出場', early_stop:'早期保護', lock_stop:'鎖利出場', trail_stop:'移動停利', tp1:'TP1 出場', time_exit:'到期出場', stale_exit:'呆倉出場' };
 function buildBreakdown(trades, keyFn){
   const map = {};
   trades.forEach(t => {
