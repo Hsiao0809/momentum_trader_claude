@@ -34,6 +34,10 @@ step('OKX and Gate market provider behavior', () => {
   execFileSync(process.execPath, ['scripts/verify-market-providers.mjs']);
 });
 
+step('XYZ reserved scan allocation', () => {
+  execFileSync(process.execPath, ['scripts/verify-xyz-scan.mjs']);
+});
+
 step('closed-trade average exit and partial-exit display', () => {
   execFileSync(process.execPath, ['scripts/verify-trade-exits.mjs']);
 });

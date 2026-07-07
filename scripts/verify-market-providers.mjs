@@ -23,9 +23,11 @@ const functionNames = [
   'validTicker',
   'normalizeOkxTickers',
   'normalizeGateTickers',
+  'normalizeXyzTickers',
   'deriveGateVolumeRatio',
   'mergeProviderInstruments',
   'normalizeGateKlines',
+  'normalizeXyzKlines',
 ];
 const functions = new Function(
   'GATE_FALLBACK_VOLUME_RATIO',
@@ -77,6 +79,22 @@ assert.equal(merged.find((ticker) => ticker.symbol === 'GATEONLYUSDT').marketPro
 assert.equal(functions.symbolFromInstId('BTC-USDT-SWAP'), 'BTCUSDT');
 assert.equal(functions.symbolFromInstId('GATE_ONLY_USDT'), 'GATEONLYUSDT');
 assert.equal(functions.providerFromInstId('GATE_ONLY_USDT'), 'gate');
+assert.equal(functions.providerFromInstId('xyz:TSLA'), 'xyz');
+assert.equal(functions.symbolFromInstId('xyz:TSLA'), 'TSLA');
+
+const xyz = functions.normalizeXyzTickers([
+  { universe: [{ name: 'xyz:TSLA' }, { name: 'xyz:SP500' }] },
+  [
+    { markPx: '420.5', prevDayPx: '410', dayNtlVlm: '26500000' },
+    { oraclePx: '7300', prevDayPx: '7250', dayNtlVlm: '207000000' },
+  ],
+]);
+assert.equal(xyz.length, 2);
+assert.equal(xyz[0].instId, 'xyz:TSLA');
+assert.equal(xyz[0].symbol, 'TSLA');
+assert.equal(xyz[0].marketProvider, 'xyz');
+assert.equal(xyz[0].quoteVolumeFloat, 26_500_000);
+assert.ok(xyz[0].change24h > 2.5);
 
 assert.deepEqual(
   functions.normalizeGateKlines([
@@ -88,11 +106,25 @@ assert.deepEqual(
     [200000, 2, 3, 1, 2.5, 20],
   ],
 );
+assert.deepEqual(
+  functions.normalizeXyzKlines([
+    { t: '200000', o: '2', h: '3', l: '1', c: '2.5', v: '20' },
+    { t: '100000', o: '1', h: '2', l: '0.5', c: '1.5', v: '10' },
+  ]),
+  [
+    [100000, 1, 2, 0.5, 1.5, 10],
+    [200000, 2, 3, 1, 2.5, 20],
+  ],
+);
 
 assert.match(source, /GATE_MIN_QUOTE_VOLUME = 5_000_000/);
+assert.match(source, /XYZ_MIN_QUOTE_VOLUME = 5_000_000/);
 assert.match(source, /marketKlines\(ticker\.marketProvider, ticker\.instId/);
 assert.match(source, /maxKlineScans: 28/);
+assert.match(source, /xyzScanLimit: 8/);
+assert.match(source, /type: 'metaAndAssetCtxs', dex: 'xyz'/);
+assert.match(source, /type: 'candleSnapshot'/);
 assert.match(source, /marketProvider: sig\.marketProvider/);
 assert.match(source, /Gate \$\{path\} \$\{response\.status\}/);
 
-console.log('market provider checks passed (volume normalization, proportional threshold, OKX preference, Gate candles)');
+console.log('market provider checks passed (OKX, Gate, and XYZ normalization, thresholds, candles, and provider routing)');

@@ -35,13 +35,15 @@ function loadSnapshotRanker(source) {
     'symbolFromInstId',
     'providerFromInstId',
     'GATE_MIN_QUOTE_VOLUME',
+    'XYZ_MIN_QUOTE_VOLUME',
     `return (${functionSource});`,
   )(
     TTL_MS,
     (instId) => instId.endsWith('_USDT')
       ? instId.slice(0, -5).replaceAll('_', '') + 'USDT'
       : instId.replace('-USDT-SWAP', 'USDT').replaceAll('-', ''),
-    (instId) => instId.endsWith('_USDT') ? 'gate' : 'okx',
+    (instId) => instId.startsWith('xyz:') ? 'xyz' : instId.endsWith('_USDT') ? 'gate' : 'okx',
+    5_000_000,
     5_000_000,
   );
 }

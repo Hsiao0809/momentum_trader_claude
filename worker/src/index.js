@@ -4,12 +4,14 @@ const NOTIFICATION_STATUS_KEY = 'notification-status-v1';
 const NOTIFICATION_DLQ = 'momentum-trader-notifications-dlq';
 const OKX_API = 'https://www.okx.com';
 const GATE_API = 'https://api.gateio.ws';
+const HYPERLIQUID_API = 'https://api.hyperliquid.xyz';
 const INTERVAL_MS = { '15m': 900000 };
 const RECENT_SIGNAL_TTL_MS = 30 * 60 * 1000;
 const RECENT_SIGNAL_LIMIT = 50;
 const TICKER_SNAPSHOT_MAX_AGE_MS = 30 * 60 * 1000;
 const GATE_MIN_QUOTE_VOLUME = 5_000_000;
 const GATE_FALLBACK_VOLUME_RATIO = 0.25;
+const XYZ_MIN_QUOTE_VOLUME = 5_000_000;
 
 const LABELS = {
   pullback_uptrend: '上升趨勢回檔',
@@ -52,6 +54,11 @@ const DEFAULT_CFG = {
   extendedScanStart: 35,
   extendedScanEnd: 160,
   extendedScanBatch: 8,
+  xyzScanLimit: 8,
+  xyzAnomalyScanLimit: 4,
+  xyzCoreScanLimit: 2,
+  xyzExtendedScanStart: 8,
+  xyzExtendedScanBatch: 2,
   scanRequestDelayMs: 500,
   scanStaleMs: 5 * 60 * 1000,
 };
@@ -194,7 +201,7 @@ async function runPaperTick(env, options = {}) {
     const state = await loadState(env);
     state.lastRunAt = now;
     state.lastRunReason = options.reason || 'unknown';
-    state.marketProvider = 'okx+gate-usdt-swap';
+    state.marketProvider = 'okx+gate+xyz-perpetuals';
 
     recoverLastFailedNotification(state);
     if (await flushPendingNotifications(state, env)) {
@@ -282,11 +289,12 @@ function defaultState() {
     lastScanAt: 0,
     lastCoreScanAt: 0,
     scanCursor: 0,
+    xyzScanCursor: 0,
     scanMeta: null,
     tickerSnapshot: null,
     lastRunAt: 0,
     lastError: null,
-    marketProvider: 'okx+gate-usdt-swap',
+    marketProvider: 'okx+gate+xyz-perpetuals',
     cfg: { ...DEFAULT_CFG },
   };
 }
@@ -296,6 +304,10 @@ function normalizeState(state) {
   cfg.maxKlineScans = Math.min(positiveInt(cfg.maxKlineScans, DEFAULT_CFG.maxKlineScans), DEFAULT_CFG.maxKlineScans);
   cfg.anomalyScanLimit = Math.min(positiveInt(cfg.anomalyScanLimit, DEFAULT_CFG.anomalyScanLimit), DEFAULT_CFG.anomalyScanLimit);
   cfg.coreScanLimit = Math.min(positiveInt(cfg.coreScanLimit, DEFAULT_CFG.coreScanLimit), DEFAULT_CFG.coreScanLimit);
+  cfg.xyzScanLimit = Math.min(positiveInt(cfg.xyzScanLimit, DEFAULT_CFG.xyzScanLimit), DEFAULT_CFG.xyzScanLimit);
+  cfg.xyzAnomalyScanLimit = Math.min(positiveInt(cfg.xyzAnomalyScanLimit, DEFAULT_CFG.xyzAnomalyScanLimit), cfg.xyzScanLimit);
+  cfg.xyzCoreScanLimit = Math.min(positiveInt(cfg.xyzCoreScanLimit, DEFAULT_CFG.xyzCoreScanLimit), cfg.xyzScanLimit);
+  cfg.xyzExtendedScanBatch = Math.min(positiveInt(cfg.xyzExtendedScanBatch, DEFAULT_CFG.xyzExtendedScanBatch), cfg.xyzScanLimit);
   cfg.scanRequestDelayMs = Math.max(positiveInt(cfg.scanRequestDelayMs, DEFAULT_CFG.scanRequestDelayMs), DEFAULT_CFG.scanRequestDelayMs);
   if (typeof state.initialEquity === 'number') cfg.initialEquity = state.initialEquity;
   if (typeof state.riskPerTrade === 'number') cfg.riskPerTrade = state.riskPerTrade;
@@ -416,7 +428,7 @@ async function scanSignals(state) {
         rows,
         ticker.quoteVolumeFloat,
         Date.now(),
-        riskOff,
+        ticker.marketProvider === 'xyz' ? false : riskOff,
         { ...cfg, minQuoteVolume: ticker.minQuoteVolume || cfg.minQuoteVolume },
       );
       if (sig) signals.push({
@@ -589,6 +601,11 @@ async function scanUniverse(state) {
   const maxKlineScans = positiveInt(cfg.maxKlineScans || cfg.scanLimit, 35);
   const anomalyLimit = positiveInt(cfg.anomalyScanLimit, 24);
   const coreLimit = positiveInt(cfg.coreScanLimit, 10);
+  const xyzScanLimit = Math.min(positiveInt(cfg.xyzScanLimit, 8), maxKlineScans);
+  const xyzAnomalyLimit = Math.min(positiveInt(cfg.xyzAnomalyScanLimit, 4), xyzScanLimit);
+  const xyzCoreLimit = Math.min(positiveInt(cfg.xyzCoreScanLimit, 2), xyzScanLimit);
+  const xyzExtendedStart = positiveInt(cfg.xyzExtendedScanStart, 8);
+  const xyzExtendedBatch = Math.min(positiveInt(cfg.xyzExtendedScanBatch, 2), xyzScanLimit);
   const coreScanEveryMs = positiveInt(cfg.coreScanEveryMs, 30 * 60 * 1000);
   const extendedStart = positiveInt(cfg.extendedScanStart, 35);
   const extendedEnd = Math.max(extendedStart, positiveInt(cfg.extendedScanEnd, 120));
@@ -601,7 +618,7 @@ async function scanUniverse(state) {
     const result = await rankedInstruments(cfg);
     ranked = result.ranked;
     providerMeta = result.providerMeta;
-    if (providerMeta.okxError || providerMeta.gateError) universeSource = 'live-partial';
+    if (providerMeta.okxError || providerMeta.gateError || providerMeta.xyzError) universeSource = 'live-partial';
   } catch (error) {
     ranked = rankedFromTickerSnapshot(state.tickerSnapshot, cfg);
     if (!ranked.length) throw error;
@@ -614,7 +631,9 @@ async function scanUniverse(state) {
     ...ticker,
     anomalyScore: anomalyScore(ticker, previousSnapshot[ticker.instId]),
   }));
-  const anomaly = scored
+  const cryptoRanked = scored.filter((ticker) => ticker.marketProvider !== 'xyz');
+  const xyzRanked = scored.filter((ticker) => ticker.marketProvider === 'xyz');
+  const anomaly = cryptoRanked
     .filter((ticker) => ticker.rank > coreLimit || ticker.anomalyScore >= 20)
     .sort((a, b) => b.anomalyScore - a.anomalyScore || b.normalizedQuoteVolume - a.normalizedQuoteVolume)
     .slice(0, anomalyLimit)
@@ -623,18 +642,49 @@ async function scanUniverse(state) {
   const now = Date.now();
   const coreDue = !state.lastCoreScanAt || now - state.lastCoreScanAt >= coreScanEveryMs;
   const core = coreDue
-    ? ranked.slice(0, coreLimit).map((ticker) => ({ ...ticker, universeTier: 'core' }))
+    ? cryptoRanked.slice(0, coreLimit).map((ticker) => ({ ...ticker, universeTier: 'core' }))
     : [];
 
-  const pool = ranked.slice(extendedStart, extendedEnd);
+  const pool = cryptoRanked.slice(extendedStart, extendedEnd);
   const cursor = Number.isFinite(Number(state.scanCursor)) ? Number(state.scanCursor) : 0;
   const extended = rotatingSlice(pool, cursor, extendedBatch).map((ticker) => ({ ...ticker, universeTier: 'extended' }));
   const nextCursor = pool.length && extendedBatch ? (cursor + extendedBatch) % pool.length : 0;
-  const deduped = [...new Map([...anomaly, ...extended, ...core].map((ticker) => [ticker.instId, ticker])).values()]
-    .slice(0, maxKlineScans);
+
+  const xyzAnomalyBudget = coreDue
+    ? xyzAnomalyLimit
+    : Math.min(xyzScanLimit - xyzExtendedBatch, xyzAnomalyLimit + xyzCoreLimit);
+  const xyzAnomaly = xyzRanked
+    .filter((ticker) => ticker.rank > xyzCoreLimit || ticker.anomalyScore >= 20)
+    .sort((a, b) => b.anomalyScore - a.anomalyScore || b.quoteVolumeFloat - a.quoteVolumeFloat)
+    .slice(0, Math.max(0, xyzAnomalyBudget))
+    .map((ticker) => ({ ...ticker, universeTier: 'xyz-anomaly' }));
+  const xyzCore = coreDue
+    ? xyzRanked.slice(0, xyzCoreLimit).map((ticker) => ({ ...ticker, universeTier: 'xyz-core' }))
+    : [];
+  const xyzPool = xyzRanked.slice(xyzExtendedStart);
+  const xyzCursor = Number.isFinite(Number(state.xyzScanCursor)) ? Number(state.xyzScanCursor) : 0;
+  const xyzExtended = rotatingSlice(xyzPool, xyzCursor, xyzExtendedBatch)
+    .map((ticker) => ({ ...ticker, universeTier: 'xyz-extended' }));
+  const nextXyzCursor = xyzPool.length && xyzExtendedBatch
+    ? (xyzCursor + xyzExtendedBatch) % xyzPool.length
+    : 0;
+  const xyzPriority = new Map(
+    [...xyzAnomaly, ...xyzExtended, ...xyzCore].map((ticker) => [ticker.instId, ticker]),
+  );
+  const xyzReserve = xyzRanked
+    .filter((ticker) => !xyzPriority.has(ticker.instId))
+    .map((ticker) => ({ ...ticker, universeTier: 'xyz-reserve' }));
+  const xyzSelected = [...xyzPriority.values(), ...xyzReserve].slice(0, xyzScanLimit);
+
+  const cryptoCandidates = [...new Map(
+    [...anomaly, ...extended, ...core].map((ticker) => [ticker.instId, ticker]),
+  ).values()];
+  const cryptoBudget = Math.max(0, maxKlineScans - xyzSelected.length);
+  const deduped = [...cryptoCandidates.slice(0, cryptoBudget), ...xyzSelected].slice(0, maxKlineScans);
 
   if (coreDue && deduped.some((ticker) => ticker.universeTier === 'core')) state.lastCoreScanAt = now;
   if (universeSource !== 'cached') state.tickerSnapshot = buildTickerSnapshot(ranked, providerMeta);
+  state.xyzScanCursor = nextXyzCursor;
 
   return {
     tickers: deduped,
@@ -646,11 +696,12 @@ async function scanUniverse(state) {
         ...providerMeta,
         okxScanned: deduped.filter((ticker) => ticker.marketProvider === 'okx').length,
         gateScanned: deduped.filter((ticker) => ticker.marketProvider === 'gate').length,
+        xyzScanned: deduped.filter((ticker) => ticker.marketProvider === 'xyz').length,
       },
       universeSnapshotAgeMs: universeSource === 'cached' ? Date.now() - Number(state.tickerSnapshot?.savedAt || 0) : 0,
       maxKlineScans,
       anomalyLimit,
-      anomalyCandidates: anomaly.length,
+      anomalyCandidates: anomaly.length + xyzAnomaly.length,
       coreLimit,
       coreDue,
       coreScanned: deduped.filter((ticker) => ticker.universeTier === 'core').length,
@@ -661,21 +712,29 @@ async function scanUniverse(state) {
       extendedPoolSize: pool.length,
       cursor,
       nextCursor,
+      xyzScanLimit,
+      xyzAnomalyCandidates: xyzAnomaly.length,
+      xyzCoreScanned: deduped.filter((ticker) => ticker.universeTier === 'xyz-core').length,
+      xyzExtendedPoolSize: xyzPool.length,
+      xyzCursor,
+      nextXyzCursor,
     },
   };
 }
 
 async function rankedInstruments(cfg) {
-  const [okxResult, gateResult] = await Promise.allSettled([
+  const [okxResult, gateResult, xyzResult] = await Promise.allSettled([
     okx('/api/v5/market/tickers', { instType: 'SWAP' }),
     gate('/api/v4/futures/usdt/tickers'),
+    hyperliquidInfo({ type: 'metaAndAssetCtxs', dex: 'xyz' }),
   ]);
-  if (okxResult.status === 'rejected' && gateResult.status === 'rejected') {
-    throw new Error(`Market universe unavailable: ${okxResult.reason}; ${gateResult.reason}`);
+  if (okxResult.status === 'rejected' && gateResult.status === 'rejected' && xyzResult.status === 'rejected') {
+    throw new Error(`Market universe unavailable: ${okxResult.reason}; ${gateResult.reason}; ${xyzResult.reason}`);
   }
 
   const okxAll = okxResult.status === 'fulfilled' ? normalizeOkxTickers(okxResult.value) : [];
   const gateAll = gateResult.status === 'fulfilled' ? normalizeGateTickers(gateResult.value) : [];
+  const xyzAll = xyzResult.status === 'fulfilled' ? normalizeXyzTickers(xyzResult.value) : [];
   const gateVolumeRatio = deriveGateVolumeRatio(okxAll, gateAll, cfg.minQuoteVolume);
   const gateMinQuoteVolume = Math.min(
     cfg.minQuoteVolume,
@@ -696,9 +755,19 @@ async function rankedInstruments(cfg) {
       minQuoteVolume: gateMinQuoteVolume,
       normalizedQuoteVolume: ticker.quoteVolumeFloat / effectiveGateVolumeRatio,
     }));
-  const ranked = mergeProviderInstruments(okxEligible, gateEligible, okxAll)
+  const cryptoRanked = mergeProviderInstruments(okxEligible, gateEligible, okxAll)
     .sort((a, b) => b.normalizedQuoteVolume - a.normalizedQuoteVolume)
     .map((ticker, index) => ({ ...ticker, rank: index + 1 }));
+  const xyzEligible = xyzAll
+    .filter((ticker) => ticker.quoteVolumeFloat >= XYZ_MIN_QUOTE_VOLUME)
+    .map((ticker) => ({
+      ...ticker,
+      minQuoteVolume: XYZ_MIN_QUOTE_VOLUME,
+      normalizedQuoteVolume: ticker.quoteVolumeFloat,
+    }))
+    .sort((a, b) => b.quoteVolumeFloat - a.quoteVolumeFloat)
+    .map((ticker, index) => ({ ...ticker, rank: index + 1 }));
+  const ranked = [...cryptoRanked, ...xyzEligible];
 
   return {
     ranked,
@@ -707,12 +776,16 @@ async function rankedInstruments(cfg) {
       okxEligible: okxEligible.length,
       gateListed: gateAll.length,
       gateEligible: gateEligible.length,
-      gateExclusive: ranked.filter((ticker) => ticker.marketProvider === 'gate').length,
+      gateExclusive: cryptoRanked.filter((ticker) => ticker.marketProvider === 'gate').length,
       gateVolumeRatio,
       effectiveGateVolumeRatio,
       gateMinQuoteVolume,
+      xyzListed: xyzAll.length,
+      xyzEligible: xyzEligible.length,
+      xyzMinQuoteVolume: XYZ_MIN_QUOTE_VOLUME,
       okxError: okxResult.status === 'rejected' ? String(okxResult.reason) : null,
       gateError: gateResult.status === 'rejected' ? String(gateResult.reason) : null,
+      xyzError: xyzResult.status === 'rejected' ? String(xyzResult.reason) : null,
     },
   };
 }
@@ -770,6 +843,31 @@ function normalizeGateTickers(tickers) {
     .filter(validTicker);
 }
 
+function normalizeXyzTickers(payload) {
+  const universe = Array.isArray(payload?.[0]?.universe) ? payload[0].universe : [];
+  const contexts = Array.isArray(payload?.[1]) ? payload[1] : [];
+  return universe
+    .map((asset, index) => {
+      const context = contexts[index] || {};
+      const last = Number(context.markPx || context.midPx || context.oraclePx || 0);
+      const open24h = Number(context.prevDayPx || 0);
+      const change24h = open24h ? (last / open24h - 1) * 100 : 0;
+      return {
+        instId: asset.name,
+        symbol: symbolFromInstId(asset.name),
+        marketProvider: 'xyz',
+        last,
+        open24h,
+        high24h: 0,
+        low24h: 0,
+        change24h,
+        range24hPosition: 0.5,
+        quoteVolumeFloat: Number(context.dayNtlVlm || 0),
+      };
+    })
+    .filter(validTicker);
+}
+
 function validTicker(ticker) {
   return ticker.symbol
     && Number.isFinite(ticker.last)
@@ -808,6 +906,10 @@ async function tickerPrice(provider, instId) {
   if (provider === 'gate') {
     const data = await gate('/api/v4/futures/usdt/tickers', { contract: instId });
     price = Number(data?.[0]?.last || 0);
+  } else if (provider === 'xyz') {
+    const ticker = normalizeXyzTickers(await hyperliquidInfo({ type: 'metaAndAssetCtxs', dex: 'xyz' }))
+      .find((item) => item.instId === instId);
+    price = Number(ticker?.last || 0);
   } else {
     const data = await okx('/api/v5/market/ticker', { instId });
     price = Number(data?.[0]?.last || 0);
@@ -824,6 +926,7 @@ async function currentPrices(state) {
   const wantedByProvider = {
     okx: new Set(wantedItems.filter((item) => (item.marketProvider || providerFromInstId(item.instId)) === 'okx').map((item) => item.instId)),
     gate: new Set(wantedItems.filter((item) => (item.marketProvider || providerFromInstId(item.instId)) === 'gate').map((item) => item.instId)),
+    xyz: new Set(wantedItems.filter((item) => (item.marketProvider || providerFromInstId(item.instId)) === 'xyz').map((item) => item.instId)),
   };
   const requests = [];
   if (wantedByProvider.okx.size) {
@@ -848,6 +951,17 @@ async function currentPrices(state) {
         timestamp: Date.now(),
       }])));
   }
+  if (wantedByProvider.xyz.size) {
+    requests.push(hyperliquidInfo({ type: 'metaAndAssetCtxs', dex: 'xyz' }).then((payload) => normalizeXyzTickers(payload)
+      .filter((ticker) => wantedByProvider.xyz.has(ticker.instId))
+      .map((ticker) => [ticker.instId, {
+        instId: ticker.instId,
+        symbol: ticker.symbol,
+        marketProvider: 'xyz',
+        last: ticker.last,
+        timestamp: Date.now(),
+      }])));
+  }
   const results = await Promise.allSettled(requests);
   return Object.fromEntries(results
     .filter((result) => result.status === 'fulfilled')
@@ -859,6 +973,21 @@ async function marketKlines(provider, instId, interval = '15m', limit = 130) {
   if (provider === 'gate') {
     const rows = await gate('/api/v4/futures/usdt/candlesticks', { contract: instId, interval, limit }, 0, 0);
     return normalizeGateKlines(rows);
+  }
+  if (provider === 'xyz') {
+    const intervalMs = INTERVAL_MS[interval];
+    if (!intervalMs) throw new Error(`XYZ unsupported interval: ${interval}`);
+    const endTime = Date.now();
+    const rows = await hyperliquidInfo({
+      type: 'candleSnapshot',
+      req: {
+        coin: instId,
+        interval,
+        startTime: endTime - (limit + 1) * intervalMs,
+        endTime,
+      },
+    }, 0, 0);
+    return normalizeXyzKlines(rows).slice(-limit);
   }
   // Keep K-line scans to one subrequest each. Retrying dozens of rate-limited
   // symbols in the same invocation can exceed Cloudflare's subrequest cap.
@@ -872,6 +1001,13 @@ async function marketKlines(provider, instId, interval = '15m', limit = 130) {
 function normalizeGateKlines(rows) {
   return rows
     .map((row) => [Number(row.t) * 1000, Number(row.o), Number(row.h), Number(row.l), Number(row.c), Number(row.v)])
+    .filter((row) => row.every((value) => Number.isFinite(value)))
+    .sort((a, b) => a[0] - b[0]);
+}
+
+function normalizeXyzKlines(rows) {
+  return rows
+    .map((row) => [Number(row.t), Number(row.o), Number(row.h), Number(row.l), Number(row.c), Number(row.v)])
     .filter((row) => row.every((value) => Number.isFinite(value)))
     .sort((a, b) => a[0] - b[0]);
 }
@@ -918,10 +1054,30 @@ async function gate(path, params = {}, attempt = 0, maxRetries = 2) {
   return response.json();
 }
 
+async function hyperliquidInfo(body, attempt = 0, maxRetries = 2) {
+  const response = await fetch(`${HYPERLIQUID_API}/info`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'User-Agent': 'momentum-trader-claude-runner/1.0',
+    },
+    body: JSON.stringify(body),
+    cf: { cacheTtl: 0 },
+  });
+  if ((response.status === 429 || response.status >= 500) && attempt < maxRetries) {
+    await sleep(500 * (attempt + 1));
+    return hyperliquidInfo(body, attempt + 1, maxRetries);
+  }
+  if (!response.ok) throw new Error(`XYZ info ${response.status}`);
+  return response.json();
+}
+
 function scanFailureReason(error) {
   const message = String(error?.message || error || '');
   if (message.includes('Gate') && message.includes('429')) return 'gate_rate_limit';
   if (message.includes('OKX') && (message.includes('429') || message.includes('50011'))) return 'okx_rate_limit';
+  if (message.includes('XYZ')) return 'xyz_api_error';
   if (message.includes('Too many subrequests')) return 'worker_subrequest_limit';
   return 'other';
 }
@@ -1322,7 +1478,11 @@ async function notifyNewPosition(env, position, state) {
 
 function positionNotificationText(position) {
   const sideText = position.side === 'short' ? '空單' : '多單';
-  const providerText = position.marketProvider === 'gate' ? 'Gate' : 'OKX';
+  const providerText = position.marketProvider === 'gate'
+    ? 'Gate'
+    : position.marketProvider === 'xyz'
+      ? 'XYZ'
+      : 'OKX';
   const reasons = (position.reasons || []).slice(0, 3).join('\n- ');
   return [
     `新模擬單：${position.symbol} ${sideText}`,
@@ -1755,17 +1915,23 @@ function sideForStrategy(key) {
 }
 
 function symbolFromInstId(instId) {
-  if (providerFromInstId(instId) === 'gate') {
+  const provider = providerFromInstId(instId);
+  if (provider === 'xyz') {
+    return String(instId).replace(/^xyz:/, '');
+  }
+  if (provider === 'gate') {
     return instId.slice(0, -'_USDT'.length).replaceAll('_', '') + 'USDT';
   }
   return instId.replace('-USDT-SWAP', 'USDT').replaceAll('-', '');
 }
 
 function providerFromInstId(instId) {
+  if (String(instId || '').startsWith('xyz:')) return 'xyz';
   return String(instId || '').endsWith('_USDT') ? 'gate' : 'okx';
 }
 
 function instIdFromSymbol(symbol, provider = 'okx') {
+  if (provider === 'xyz') return `xyz:${String(symbol).replace(/^xyz:/i, '')}`;
   const base = symbol.replace(/USDT$/, '');
   return provider === 'gate' ? `${base}_USDT` : `${base}-USDT-SWAP`;
 }
@@ -1819,7 +1985,9 @@ function rankedFromTickerSnapshot(snapshot, cfg, now = Date.now()) {
       minQuoteVolume: Number(ticker.minQuoteVolume || (
         (ticker.marketProvider || providerFromInstId(instId)) === 'gate'
           ? snapshot.providerMeta?.gateMinQuoteVolume || GATE_MIN_QUOTE_VOLUME
-          : cfg.minQuoteVolume
+          : (ticker.marketProvider || providerFromInstId(instId)) === 'xyz'
+            ? snapshot.providerMeta?.xyzMinQuoteVolume || XYZ_MIN_QUOTE_VOLUME
+            : cfg.minQuoteVolume
       )),
       normalizedQuoteVolume: Number(ticker.normalizedQuoteVolume || ticker.quoteVolumeFloat || 0),
       rank: Number(ticker.rank || 0),
@@ -1827,7 +1995,9 @@ function rankedFromTickerSnapshot(snapshot, cfg, now = Date.now()) {
     .filter((ticker) => (
       ticker.marketProvider === 'gate'
         ? ticker.quoteVolumeFloat >= Number(snapshot.providerMeta?.gateMinQuoteVolume || GATE_MIN_QUOTE_VOLUME)
-        : ticker.quoteVolumeFloat >= cfg.minQuoteVolume
+        : ticker.marketProvider === 'xyz'
+          ? ticker.quoteVolumeFloat >= Number(snapshot.providerMeta?.xyzMinQuoteVolume || XYZ_MIN_QUOTE_VOLUME)
+          : ticker.quoteVolumeFloat >= cfg.minQuoteVolume
     ))
     .sort((a, b) => a.rank - b.rank || b.quoteVolumeFloat - a.quoteVolumeFloat);
 }
