@@ -1205,6 +1205,8 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
     const key = strategyKey(metrics);
     // 追價策略硬性擋單：1h 已衝 4% 以上不追
     if (key === 'strong_momentum_breakout' && momentum1h >= 4) return null;
+    // 放量單專屬窄停損：ATR 門檻已保證標的在動，2% 停損換更高賺賠比
+    if (key === 'volume_ignition') { risk.stop = price * 0.98; risk.stopPct = 2; metrics.stopPct = 2; }
     // 回檔單專屬 +4% 早期保護：浮盈 +4% 後停損拉到 -1%
     const earlyTrigger = key === 'pullback_uptrend' ? price * 1.04 : undefined;
     const earlyLevel = key === 'pullback_uptrend' ? price * 0.99 : undefined;
@@ -1906,7 +1908,8 @@ function strategyKey(m) {
   if (m.isPullback) return 'pullback_uptrend';
   if ((m.momentum4h >= 15 && m.position24h >= 0.80) || (m.momentum24h >= 20 && m.distancePrevHigh >= -2)) return 'strong_momentum_breakout';
   if (m.momentum24h >= 8 && m.position24h >= 0.75 && m.position24h < 0.92 && m.momentum4h >= -3 && m.momentum4h <= 8) return 'high_range_continuation';
-  if (m.volumeRatio >= 2 && m.position24h >= 0.65 && m.momentum1h > -1) return 'volume_ignition';
+  // ATR 門檻：擋掉低波動標的（美股代幣隔夜死水）的單根量能假觸發
+  if (m.volumeRatio >= 2 && m.position24h >= 0.65 && m.momentum1h > -1 && m.atrPct >= 0.8) return 'volume_ignition';
   return 'narrative_momentum';
 }
 
