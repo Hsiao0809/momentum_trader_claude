@@ -38,8 +38,8 @@ const STRATEGY_SIDES = {
 const DEFAULT_CFG = {
   initialEquity: 1000,
   riskPerTrade: 0.01,
-  maxPositions: 5,
-  maxTotalRisk: 0.05,
+  maxPositions: 8,
+  maxTotalRisk: 0.08,
   minQuoteVolume: 20000000,
   minSignalScore: 70,
   paperMinScore: 82,
@@ -309,6 +309,9 @@ function normalizeState(state) {
   cfg.xyzCoreScanLimit = Math.min(positiveInt(cfg.xyzCoreScanLimit, DEFAULT_CFG.xyzCoreScanLimit), cfg.xyzScanLimit);
   cfg.xyzExtendedScanBatch = Math.min(positiveInt(cfg.xyzExtendedScanBatch, DEFAULT_CFG.xyzExtendedScanBatch), cfg.xyzScanLimit);
   cfg.scanRequestDelayMs = Math.max(positiveInt(cfg.scanRequestDelayMs, DEFAULT_CFG.scanRequestDelayMs), DEFAULT_CFG.scanRequestDelayMs);
+  // maxPositions/maxTotalRisk 不開放 /config 設定，KV 裡的舊值只是過期快取，一律以程式碼預設為準
+  cfg.maxPositions = DEFAULT_CFG.maxPositions;
+  cfg.maxTotalRisk = DEFAULT_CFG.maxTotalRisk;
   if (typeof state.initialEquity === 'number') cfg.initialEquity = state.initialEquity;
   if (typeof state.riskPerTrade === 'number') cfg.riskPerTrade = state.riskPerTrade;
   const normalized = {
@@ -563,6 +566,13 @@ async function updatePositions(state, options = {}) {
         }
         if (!p.tp1Done && (p.side === 'short' ? low <= p.tp1 : high >= p.tp1)) {
           takeTP1(state, p, kTime(bar));
+        }
+        // 呆倉踢除：持有 24h 仍未達 +1% 且未觸發任何保護層 → 出場讓位給新訊號
+        const staleProfit = p.side === 'short' ? (p.entry - close) / p.entry : (close - p.entry) / p.entry;
+        if (kTime(bar) >= p.entryTime + 24 * 60 * 60 * 1000 && staleProfit < 0.01 && !p.tp1Done && !p.bePartialDone) {
+          closePosition(state, p, close, 'stale_exit', kTime(bar));
+          closed = true;
+          break;
         }
         if (kTime(bar) >= p.entryTime + state.cfg.maxHoldHours * 60 * 60 * 1000) {
           closePosition(state, p, close, 'time_exit', kTime(bar));
