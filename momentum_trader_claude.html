@@ -22,6 +22,9 @@
     .controls{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;line-height:1.2}
     .runtime-status{display:flex;align-items:center;flex-wrap:wrap;gap:6px 18px;margin-top:7px}
     .runtime-status .status{min-width:0!important;max-width:360px}
+    .runtime-status .status.ok{color:var(--green)}
+    .runtime-status .status.warn{color:var(--accent);font-weight:600}
+    .runtime-status .status.stale{color:var(--red);font-weight:700}
     body.drawer-open{overflow:hidden}
     .drawer-backdrop{position:fixed;inset:0;z-index:90;background:rgba(0,0,0,.52);opacity:0;pointer-events:none;transition:opacity .18s ease}
     .drawer-backdrop.open{opacity:1;pointer-events:auto}
@@ -187,6 +190,7 @@
     <input id="autoScanMin" type="hidden" value="5">
   </div>
   <div class="runtime-status">
+    <span id="runnerStatus" class="status"></span>
     <span id="syncStatus" class="status"></span>
     <span id="priceStatus" class="status"></span>
     <span id="notifyStatus" class="status"></span>
@@ -419,6 +423,8 @@ const INTERVAL_MS = { '15m': 900000 };
 const RECENT_SIGNAL_TTL_MS = 30 * 60 * 1000;
 const RECENT_SIGNAL_LIMIT = 50;
 const LIVE_REFRESH_MS = 30000;
+const RUNNER_STALE_MS = 10 * 60 * 1000;
+const SCAN_STALE_WARN_MS = 20 * 60 * 1000;
 const BROWSER_NOTIFY_ENABLED_KEY = 'momentumBrowserNotificationsEnabled';
 const BROWSER_NOTIFY_SEEN_KEY = 'momentumLastBrowserNotificationId';
 const TZ = 'Asia/Taipei';
@@ -582,6 +588,59 @@ function setSyncStatus(msg, isErr=false){
   el.style.color = isErr ? 'var(--red)' : 'var(--green)';
   clearTimeout(syncStatusTimer);
   syncStatusTimer = setTimeout(() => { el.textContent = ''; el.style.color = ''; }, 5000);
+}
+
+function ageLabel(sinceMs){
+  const ageMs = nowMs() - Number(sinceMs || 0);
+  if(!Number.isFinite(ageMs) || ageMs < 0) return '';
+  const minutes = Math.floor(ageMs / 60000);
+  if(minutes < 1) return '<1m';
+  if(minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours}h${rest}m` : `${hours}h`;
+}
+
+function updateRunnerStatus(){
+  const el = document.getElementById('runnerStatus');
+  if(!el) return;
+  el.classList.remove('ok', 'warn', 'stale');
+  if(!SERVER_MODE){
+    el.textContent = '';
+    return;
+  }
+
+  const lastRunAt = Number(state.lastRunAt || 0);
+  const lastScanAt = Number(state.lastScanAt || 0);
+  const hasOpenPositions = (state.positions || []).length > 0;
+  const shouldMonitor = Boolean(state.running || hasOpenPositions);
+
+  if(!shouldMonitor){
+    el.textContent = lastRunAt ? `後端：停止 · 上次 ${tw(lastRunAt)}` : '後端：停止';
+    return;
+  }
+
+  if(!lastRunAt){
+    el.textContent = '後端停滯：尚未收到 tick';
+    el.classList.add('stale');
+    return;
+  }
+
+  const runAge = nowMs() - lastRunAt;
+  const scanAge = lastScanAt ? nowMs() - lastScanAt : 0;
+  if(runAge > RUNNER_STALE_MS){
+    el.textContent = `後端停滯 ${ageLabel(lastRunAt)} · 上次 ${tw(lastRunAt)}`;
+    el.classList.add('stale');
+    return;
+  }
+  if(lastScanAt && scanAge > SCAN_STALE_WARN_MS){
+    el.textContent = `掃描延遲 ${ageLabel(lastScanAt)} · tick ${tw(lastRunAt)}`;
+    el.classList.add('warn');
+    return;
+  }
+
+  el.textContent = `後端正常 · tick ${tw(lastRunAt)}`;
+  el.classList.add('ok');
 }
 
 async function fetchGist(){
@@ -2219,6 +2278,7 @@ function setupPnlChart(){
   });
 }
 function paintAll(){
+  updateRunnerStatus();
   const bt = state.backtest;
   const paperStats = statsFromTrades(state.trades || []);
   const drawdown = safeDiv(state.peakEquity - state.equity, state.peakEquity, 0) * 100;
@@ -2483,7 +2543,10 @@ setupLiveRefresh();
 setInterval(() => { if(state.running && !SERVER_MODE) paperTick(); }, 60000);
 setInterval(refreshSignalPrices, 60000);
 setInterval(refreshMarks, 15000);
-setInterval(() => { if(state.positions.length || state.running) drawSpark(), updateStatusLine(state.running ? `Paper running · ${state.positions.length} open · ${tw(nowMs())}` : `Paper stopped · ${tw(nowMs())}`); }, 30000);
+setInterval(() => {
+  updateRunnerStatus();
+  if(state.positions.length || state.running) drawSpark(), updateStatusLine(state.running ? `Paper running · ${state.positions.length} open · ${tw(nowMs())}` : `Paper stopped · ${tw(nowMs())}`);
+}, 30000);
 (async () => {
   const cloud = await fetchGist();
   if(cloud && (cloud.savedAt || 0) > (state.savedAt || 0)){
