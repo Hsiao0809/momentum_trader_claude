@@ -120,8 +120,12 @@ assert.deepEqual(
 assert.match(source, /GATE_MIN_QUOTE_VOLUME = 5_000_000/);
 assert.match(source, /XYZ_MIN_QUOTE_VOLUME = 5_000_000/);
 assert.match(source, /marketKlines\(ticker\.marketProvider, ticker\.instId/);
-assert.match(source, /maxKlineScans: 28/);
-assert.match(source, /xyzScanLimit: 8/);
+assert.match(source, /maxKlineScans: 16/);
+assert.match(source, /xyzScanLimit: 4/);
+assert.match(source, /scanStaleMs: 10 \* 60 \* 1000/);
+assert.match(source, /const willScan = options\.forceScan \|\| scanStale/);
+assert.match(source, /POSITION_KLINE_LOOKBACK_MAX = 96/);
+assert.match(source, /marketKlines\(provider, instId, '15m', positionKlineLimit\(p\)\)/);
 assert.match(source, /type: 'metaAndAssetCtxs', dex: 'xyz'/);
 assert.match(source, /type: 'candleSnapshot'/);
 assert.match(source, /marketProvider: sig\.marketProvider/);

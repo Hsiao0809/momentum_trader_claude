@@ -67,18 +67,18 @@ const scanUniverse = new Function(
 );
 
 const cfg = {
-  maxKlineScans: 28,
-  anomalyScanLimit: 20,
-  coreScanLimit: 6,
+  maxKlineScans: 16,
+  anomalyScanLimit: 10,
+  coreScanLimit: 3,
   coreScanEveryMs: 30 * 60 * 1000,
   extendedScanStart: 35,
   extendedScanEnd: 160,
-  extendedScanBatch: 8,
-  xyzScanLimit: 8,
-  xyzAnomalyScanLimit: 4,
-  xyzCoreScanLimit: 2,
+  extendedScanBatch: 3,
+  xyzScanLimit: 4,
+  xyzAnomalyScanLimit: 2,
+  xyzCoreScanLimit: 1,
   xyzExtendedScanStart: 8,
-  xyzExtendedScanBatch: 2,
+  xyzExtendedScanBatch: 1,
 };
 const state = {
   cfg,
@@ -88,18 +88,18 @@ const state = {
   tickerSnapshot: null,
 };
 const first = await scanUniverse(state);
-assert.equal(first.tickers.length, 28);
-assert.equal(first.tickers.filter((ticker) => ticker.marketProvider === 'xyz').length, 8);
-assert.equal(first.tickers.filter((ticker) => ticker.marketProvider !== 'xyz').length, 20);
-assert.equal(first.meta.providerMeta.xyzScanned, 8);
+assert.equal(first.tickers.length, 16);
+assert.equal(first.tickers.filter((ticker) => ticker.marketProvider === 'xyz').length, 4);
+assert.equal(first.tickers.filter((ticker) => ticker.marketProvider !== 'xyz').length, 12);
+assert.equal(first.meta.providerMeta.xyzScanned, 4);
 assert.ok(first.tickers.some((ticker) => ticker.universeTier === 'xyz-core'));
 assert.ok(first.tickers.some((ticker) => ticker.universeTier === 'xyz-extended'));
 
 state.lastCoreScanAt = Date.now();
 const second = await scanUniverse(state);
-assert.equal(second.tickers.length, 28);
-assert.equal(second.tickers.filter((ticker) => ticker.marketProvider === 'xyz').length, 8);
+assert.equal(second.tickers.length, 16);
+assert.equal(second.tickers.filter((ticker) => ticker.marketProvider === 'xyz').length, 4);
 assert.equal(second.meta.xyzCoreScanned, 0);
 assert.notEqual(second.meta.nextXyzCursor, first.meta.nextXyzCursor);
 
-console.log('XYZ scan allocation checks passed (28 total, 8 XYZ reserved, anomaly/core/rotation coverage)');
+console.log('XYZ scan allocation checks passed (16 total, 4 XYZ reserved, anomaly/core/rotation coverage)');
