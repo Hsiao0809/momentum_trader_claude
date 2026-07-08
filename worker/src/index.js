@@ -12,6 +12,8 @@ const TICKER_SNAPSHOT_MAX_AGE_MS = 30 * 60 * 1000;
 const GATE_MIN_QUOTE_VOLUME = 5_000_000;
 const GATE_FALLBACK_VOLUME_RATIO = 0.25;
 const XYZ_MIN_QUOTE_VOLUME = 5_000_000;
+const POSITION_KLINE_LOOKBACK_MIN = 8;
+const POSITION_KLINE_LOOKBACK_MAX = 96;
 
 const LABELS = {
   pullback_uptrend: '上升趨勢回檔',
@@ -47,20 +49,20 @@ const DEFAULT_CFG = {
   cooldownBars: 96,
   symbolStopCooldownMs: 24 * 60 * 60 * 1000,
   scanLimit: 35,
-  maxKlineScans: 28,
-  anomalyScanLimit: 20,
-  coreScanLimit: 6,
+  maxKlineScans: 16,
+  anomalyScanLimit: 10,
+  coreScanLimit: 3,
   coreScanEveryMs: 30 * 60 * 1000,
   extendedScanStart: 35,
   extendedScanEnd: 160,
-  extendedScanBatch: 8,
-  xyzScanLimit: 8,
-  xyzAnomalyScanLimit: 4,
-  xyzCoreScanLimit: 2,
+  extendedScanBatch: 3,
+  xyzScanLimit: 4,
+  xyzAnomalyScanLimit: 2,
+  xyzCoreScanLimit: 1,
   xyzExtendedScanStart: 8,
-  xyzExtendedScanBatch: 2,
+  xyzExtendedScanBatch: 1,
   scanRequestDelayMs: 500,
-  scanStaleMs: 5 * 60 * 1000,
+  scanStaleMs: 10 * 60 * 1000,
 };
 
 const CORS_HEADERS = {
@@ -213,7 +215,7 @@ async function runPaperTick(env, options = {}) {
     }
 
     const scanStale = !state.signals.length || now - (state.lastScanAt || 0) >= state.cfg.scanStaleMs;
-    const willScan = options.forceScan || options.scheduledScan || scanStale;
+    const willScan = options.forceScan || scanStale;
     await updatePositions(state, { markToMarket: !willScan });
 
     if (willScan) {
@@ -309,6 +311,7 @@ function normalizeState(state) {
   cfg.xyzCoreScanLimit = Math.min(positiveInt(cfg.xyzCoreScanLimit, DEFAULT_CFG.xyzCoreScanLimit), cfg.xyzScanLimit);
   cfg.xyzExtendedScanBatch = Math.min(positiveInt(cfg.xyzExtendedScanBatch, DEFAULT_CFG.xyzExtendedScanBatch), cfg.xyzScanLimit);
   cfg.scanRequestDelayMs = Math.max(positiveInt(cfg.scanRequestDelayMs, DEFAULT_CFG.scanRequestDelayMs), DEFAULT_CFG.scanRequestDelayMs);
+  cfg.scanStaleMs = Math.max(positiveInt(cfg.scanStaleMs, DEFAULT_CFG.scanStaleMs), DEFAULT_CFG.scanStaleMs);
   // maxPositions/maxTotalRisk 不開放 /config 設定，KV 裡的舊值只是過期快取，一律以程式碼預設為準
   cfg.maxPositions = DEFAULT_CFG.maxPositions;
   cfg.maxTotalRisk = DEFAULT_CFG.maxTotalRisk;
@@ -545,7 +548,7 @@ async function updatePositions(state, options = {}) {
     try {
       const provider = p.marketProvider || providerFromInstId(p.instId);
       const instId = p.instId || instIdFromSymbol(p.symbol, provider);
-      const rows = closedKlines(await marketKlines(provider, instId, '15m', 300));
+      const rows = closedKlines(await marketKlines(provider, instId, '15m', positionKlineLimit(p)));
       for (const bar of rows) {
         if (kTime(bar) <= p.lastTime) continue;
         p.lastTime = kTime(bar);
@@ -1816,6 +1819,13 @@ function closedKlines(rows) {
   if (!rows.length) return [];
   const currentOpen = Math.floor(Date.now() / INTERVAL_MS['15m']) * INTERVAL_MS['15m'];
   return Number(rows[rows.length - 1][0]) >= currentOpen ? rows.slice(0, -1) : rows.slice();
+}
+
+function positionKlineLimit(position) {
+  const lastTime = Number(position?.lastTime || position?.entryTime || 0);
+  if (!lastTime) return POSITION_KLINE_LOOKBACK_MAX;
+  const missingBars = Math.ceil(Math.max(0, Date.now() - lastTime) / INTERVAL_MS['15m']);
+  return clamp(missingBars + 4, POSITION_KLINE_LOOKBACK_MIN, POSITION_KLINE_LOOKBACK_MAX);
 }
 
 function atrPct(rows, period = 14) {
