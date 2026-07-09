@@ -13,7 +13,7 @@ const GATE_MIN_QUOTE_VOLUME = 5_000_000;
 const GATE_FALLBACK_VOLUME_RATIO = 0.25;
 const XYZ_MIN_QUOTE_VOLUME = 5_000_000;
 const POSITION_KLINE_LOOKBACK_MIN = 8;
-const POSITION_KLINE_LOOKBACK_MAX = 96;
+const POSITION_KLINE_LOOKBACK_MAX = 48;
 
 const LABELS = {
   pullback_uptrend: '上升趨勢回檔',
@@ -50,6 +50,7 @@ const DEFAULT_CFG = {
   symbolStopCooldownMs: 24 * 60 * 60 * 1000,
   scanLimit: 35,
   maxKlineScans: 16,
+  scanBatchSize: 4,
   anomalyScanLimit: 10,
   coreScanLimit: 3,
   coreScanEveryMs: 30 * 60 * 1000,
@@ -215,14 +216,15 @@ async function runPaperTick(env, options = {}) {
     }
 
     const scanStale = !state.signals.length || now - (state.lastScanAt || 0) >= state.cfg.scanStaleMs;
-    const willScan = options.forceScan || scanStale;
+    const willScan = options.forceScan || hasActiveScanPlan(state) || scanStale;
     await updatePositions(state, { markToMarket: !willScan });
 
     if (willScan) {
-      const currentSignals = await scanSignals(state);
-      state.lastScanAt = Date.now();
+      const currentSignals = await scanSignals(state, { forceNewPlan: options.forceScan });
+      const signalSeenAt = state.scanMeta?.scannedAt || Date.now();
+      if (state.scanMeta?.scanComplete) state.lastScanAt = signalSeenAt;
       state.signals = currentSignals;
-      state.recentSignals = mergeRecentSignals(state.recentSignals, currentSignals, state.lastScanAt);
+      state.recentSignals = mergeRecentSignals(state.recentSignals, currentSignals, signalSeenAt);
     }
 
     if (state.running && !options.onlyScan) {
@@ -292,6 +294,7 @@ function defaultState() {
     lastCoreScanAt: 0,
     scanCursor: 0,
     xyzScanCursor: 0,
+    scanPlan: null,
     scanMeta: null,
     tickerSnapshot: null,
     lastRunAt: 0,
@@ -304,12 +307,14 @@ function defaultState() {
 function normalizeState(state) {
   const cfg = { ...DEFAULT_CFG, ...(state.cfg || {}) };
   cfg.maxKlineScans = Math.min(positiveInt(cfg.maxKlineScans, DEFAULT_CFG.maxKlineScans), DEFAULT_CFG.maxKlineScans);
+  cfg.scanBatchSize = Math.min(positiveInt(cfg.scanBatchSize, DEFAULT_CFG.scanBatchSize), DEFAULT_CFG.scanBatchSize, cfg.maxKlineScans);
   cfg.anomalyScanLimit = Math.min(positiveInt(cfg.anomalyScanLimit, DEFAULT_CFG.anomalyScanLimit), DEFAULT_CFG.anomalyScanLimit);
   cfg.coreScanLimit = Math.min(positiveInt(cfg.coreScanLimit, DEFAULT_CFG.coreScanLimit), DEFAULT_CFG.coreScanLimit);
+  cfg.extendedScanBatch = Math.min(positiveInt(cfg.extendedScanBatch, DEFAULT_CFG.extendedScanBatch), DEFAULT_CFG.extendedScanBatch);
   cfg.xyzScanLimit = Math.min(positiveInt(cfg.xyzScanLimit, DEFAULT_CFG.xyzScanLimit), DEFAULT_CFG.xyzScanLimit);
-  cfg.xyzAnomalyScanLimit = Math.min(positiveInt(cfg.xyzAnomalyScanLimit, DEFAULT_CFG.xyzAnomalyScanLimit), cfg.xyzScanLimit);
-  cfg.xyzCoreScanLimit = Math.min(positiveInt(cfg.xyzCoreScanLimit, DEFAULT_CFG.xyzCoreScanLimit), cfg.xyzScanLimit);
-  cfg.xyzExtendedScanBatch = Math.min(positiveInt(cfg.xyzExtendedScanBatch, DEFAULT_CFG.xyzExtendedScanBatch), cfg.xyzScanLimit);
+  cfg.xyzAnomalyScanLimit = Math.min(positiveInt(cfg.xyzAnomalyScanLimit, DEFAULT_CFG.xyzAnomalyScanLimit), DEFAULT_CFG.xyzAnomalyScanLimit, cfg.xyzScanLimit);
+  cfg.xyzCoreScanLimit = Math.min(positiveInt(cfg.xyzCoreScanLimit, DEFAULT_CFG.xyzCoreScanLimit), DEFAULT_CFG.xyzCoreScanLimit, cfg.xyzScanLimit);
+  cfg.xyzExtendedScanBatch = Math.min(positiveInt(cfg.xyzExtendedScanBatch, DEFAULT_CFG.xyzExtendedScanBatch), DEFAULT_CFG.xyzExtendedScanBatch, cfg.xyzScanLimit);
   cfg.scanRequestDelayMs = Math.max(positiveInt(cfg.scanRequestDelayMs, DEFAULT_CFG.scanRequestDelayMs), DEFAULT_CFG.scanRequestDelayMs);
   cfg.scanStaleMs = Math.max(positiveInt(cfg.scanStaleMs, DEFAULT_CFG.scanStaleMs), DEFAULT_CFG.scanStaleMs);
   // maxPositions/maxTotalRisk 不開放 /config 設定，KV 裡的舊值只是過期快取，一律以程式碼預設為準
@@ -331,6 +336,7 @@ function normalizeState(state) {
     equityCurve: Array.isArray(state.equityCurve) ? state.equityCurve : [],
     notificationLog: Array.isArray(state.notificationLog) ? state.notificationLog.slice(0, 100) : [],
     pendingNotifications: Array.isArray(state.pendingNotifications) ? state.pendingNotifications.slice(0, 20) : [],
+    scanPlan: normalizeScanPlan(state.scanPlan),
   };
   normalizeStrategyLabels(normalized.signals);
   normalizeStrategyLabels(normalized.recentSignals);
@@ -342,6 +348,36 @@ function normalizeState(state) {
   normalizeMarketProviders(normalized.trades);
   for (const position of normalized.positions) ensurePositionEvents(position);
   return normalized;
+}
+
+function hasActiveScanPlan(state) {
+  const plan = state?.scanPlan;
+  return Boolean(plan && Array.isArray(plan.tickers) && Number(plan.cursor || 0) < plan.tickers.length);
+}
+
+function normalizeScanPlan(plan) {
+  if (!plan || typeof plan !== 'object' || !Array.isArray(plan.tickers)) return null;
+  const maxTickers = DEFAULT_CFG.maxKlineScans;
+  const tickers = plan.tickers
+    .filter((ticker) => ticker?.instId && ticker?.symbol && ticker?.marketProvider)
+    .slice(0, maxTickers);
+  if (!tickers.length) return null;
+  const cursor = Math.min(Math.max(0, Number(plan.cursor || 0)), tickers.length);
+  if (cursor >= tickers.length) return null;
+  return {
+    id: String(plan.id || `scan_${Date.now()}`),
+    createdAt: Number(plan.createdAt || Date.now()),
+    cursor,
+    tickers,
+    meta: plan.meta && typeof plan.meta === 'object' ? plan.meta : {},
+    riskOff: Boolean(plan.riskOff),
+    btcContextOk: plan.btcContextOk !== false,
+    signals: Array.isArray(plan.signals) ? plan.signals.slice(0, maxTickers) : [],
+    successfulScanCount: Math.max(0, Number(plan.successfulScanCount || 0)),
+    failedScanCount: Math.max(0, Number(plan.failedScanCount || 0)),
+    failedSymbols: Array.isArray(plan.failedSymbols) ? plan.failedSymbols.slice(0, 8) : [],
+    failedReasonCounts: plan.failedReasonCounts && typeof plan.failedReasonCounts === 'object' ? plan.failedReasonCounts : {},
+  };
 }
 
 function normalizeStrategyLabels(items) {
@@ -406,7 +442,7 @@ function applyConfig(state, body = {}) {
   }
 }
 
-async function scanSignals(state) {
+async function createScanPlan(state) {
   const cfg = state.cfg;
   const { tickers, meta } = await scanUniverse(state);
   let riskOff = false;
@@ -418,54 +454,92 @@ async function scanSignals(state) {
     btcContextOk = false;
     console.warn('BTC risk context failed', error);
   }
-  const signals = [];
-  let successfulScanCount = 0;
-  let failedScanCount = 0;
-  const failedSymbols = [];
-  const failedReasonCounts = {};
+  return {
+    id: `scan_${Date.now()}`,
+    createdAt: Date.now(),
+    cursor: 0,
+    tickers,
+    meta,
+    riskOff,
+    btcContextOk,
+    signals: [],
+    successfulScanCount: 0,
+    failedScanCount: 0,
+    failedSymbols: [],
+    failedReasonCounts: {},
+  };
+}
 
-  for (const ticker of tickers) {
+async function scanSignals(state, options = {}) {
+  const cfg = state.cfg;
+  if (options.forceNewPlan || !hasActiveScanPlan(state)) {
+    state.scanPlan = await createScanPlan(state);
+  }
+
+  const plan = state.scanPlan;
+  const batchSize = Math.min(positiveInt(cfg.scanBatchSize, DEFAULT_CFG.scanBatchSize), plan.tickers.length || DEFAULT_CFG.scanBatchSize);
+  const batch = plan.tickers.slice(plan.cursor, plan.cursor + batchSize);
+
+  for (const ticker of batch) {
     try {
       const rows = await marketKlines(ticker.marketProvider, ticker.instId, '15m', 130);
-      successfulScanCount++;
+      plan.successfulScanCount++;
       const sig = evaluateSignal(
         ticker.symbol,
         ticker.instId,
         rows,
         ticker.quoteVolumeFloat,
         Date.now(),
-        ticker.marketProvider === 'xyz' ? false : riskOff,
+        ticker.marketProvider === 'xyz' ? false : plan.riskOff,
         { ...cfg, minQuoteVolume: ticker.minQuoteVolume || cfg.minQuoteVolume },
       );
-      if (sig) signals.push({
+      if (sig) plan.signals.push({
         ...sig,
         marketProvider: ticker.marketProvider,
         universeTier: ticker.universeTier,
         universeRank: ticker.rank,
       });
     } catch (error) {
-      failedScanCount++;
-      if (failedSymbols.length < 8) failedSymbols.push(ticker.symbol);
+      plan.failedScanCount++;
+      if (plan.failedSymbols.length < 8) plan.failedSymbols.push(ticker.symbol);
       const reason = scanFailureReason(error);
-      failedReasonCounts[reason] = Number(failedReasonCounts[reason] || 0) + 1;
+      plan.failedReasonCounts[reason] = Number(plan.failedReasonCounts[reason] || 0) + 1;
       console.warn('scan failed', ticker.instId, error);
     }
     await sleep(positiveInt(cfg.scanRequestDelayMs, DEFAULT_CFG.scanRequestDelayMs));
   }
 
-  state.scanCursor = meta.nextCursor;
+  plan.cursor += batch.length;
+  const complete = plan.cursor >= plan.tickers.length;
+  const signals = [...plan.signals].sort((a, b) => b.score - a.score || b.quoteVolume - a.quoteVolume);
+  const scannedTickers = plan.tickers.slice(0, plan.cursor);
   state.scanMeta = {
-    ...meta,
+    ...plan.meta,
+    providerMeta: {
+      ...(plan.meta.providerMeta || {}),
+      okxScanned: scannedTickers.filter((ticker) => ticker.marketProvider === 'okx').length,
+      gateScanned: scannedTickers.filter((ticker) => ticker.marketProvider === 'gate').length,
+      xyzScanned: scannedTickers.filter((ticker) => ticker.marketProvider === 'xyz').length,
+    },
     scannedAt: Date.now(),
-    scannedCount: tickers.length,
-    successfulScanCount,
-    failedScanCount,
-    failedSymbols,
-    failedReasonCounts,
-    btcContextOk,
+    scannedCount: plan.cursor,
+    plannedScanCount: plan.tickers.length,
+    batchScannedCount: batch.length,
+    successfulScanCount: plan.successfulScanCount,
+    failedScanCount: plan.failedScanCount,
+    failedSymbols: plan.failedSymbols,
+    failedReasonCounts: plan.failedReasonCounts,
+    btcContextOk: plan.btcContextOk,
+    scanComplete: complete,
+    scanBatchSize: batchSize,
     signalCount: signals.length,
   };
-  return signals.sort((a, b) => b.score - a.score || b.quoteVolume - a.quoteVolume);
+
+  if (complete) {
+    state.scanCursor = plan.meta.nextCursor;
+    state.scanPlan = null;
+  }
+  return signals;
 }
 
 async function openNewPositions(state, env) {

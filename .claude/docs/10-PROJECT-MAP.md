@@ -67,7 +67,7 @@
   - GET `/`（健康）、`/state`、`/prices`、`/snapshot`
   - POST `/start`、`/stop`、`/reset`、`/config`、`/scan`、`/tick`、`/notify/test`
 - `runPaperTick`（cron 主流程）→ `scanSignals` → `openNewPositions` / `updatePositions`
-- 掃描預算邏輯：`scanUniverse`、`rankedInstruments`、`normalizeOkxTickers`、`normalizeGateTickers`、`deriveGateVolumeRatio`、`anomalyScore`、`buildTickerSnapshot`、`rotatingSlice`（OKX 優先、Gate-only 補充；Gate 門檻按共同標的成交量中位比例調整且不低於 5M；anomaly-first；每次掃描 K-line 上限 16 次、XYZ 保留 4 次、候選上限 10、核心標的每 30 分鐘輪掃）
+- 掃描預算邏輯：`scanUniverse`、`rankedInstruments`、`normalizeOkxTickers`、`normalizeGateTickers`、`deriveGateVolumeRatio`、`anomalyScore`、`buildTickerSnapshot`、`rotatingSlice`（OKX 優先、Gate-only 補充；Gate 門檻按共同標的成交量中位比例調整且不低於 5M；anomaly-first；完整 scan plan 上限 16 個 K-line、XYZ 保留 4 個，但每次 Worker invocation 只評估 4 個，後續 tick 接續 `scanPlan`；候選上限 10、核心標的每 30 分鐘輪掃）
 - 狀態：`loadState`/`saveState`/`normalizeState`/`applyConfig`（KV）；每筆 position 的 `events` 記錄開倉、保護升級、分批、TP1、平倉，沿用既有 state write
 - 通知：`notifyNewPosition` → Queue（`queuePositionNotification`）；`handleNotificationQueue`/`handleNotificationDeadLetters`；KV pending 是 fallback（`flushPendingNotifications`）
 - 策略（雙實作區）：`evaluateSignal`、`buildRisk`⋯（見上表）
@@ -76,7 +76,7 @@
 
 1. **KV 寫入預算**：free plan。cron 每天 288 次、每次約 2 writes（lock+state；有新開倉通知時另 +1 次 NOTIFICATION_STATUS_KEY）≈ 576/日，只剩約 424/日給手動操作。→ 預設不在 tick 路徑新增 KV write；使用者要求的功能必須加時，先算出「每日 +N writes」寫進回覆並取得使用者同意。
    **「動到 tick/掃描/KV 路徑」的機械判準**：你的 diff 是否改變了每次 tick 的外部 fetch 次數或 KV write 次數？是 → 逐條核對本節；否（純計算邏輯、UI、文案）→ 不需。
-2. **掃描預算**：每次掃描 K-line ≤ 16 次，持倉更新用 `positionKlineLimit()` 動態抓 8-96 根，不再固定抓 300 根。→ 不要加不設上限的迴圈 fetch。
+2. **掃描預算**：完整 scan plan ≤ 16 個 K-line，但每次 invocation 只評估 4 個；持倉更新用 `positionKlineLimit()` 動態抓 8-48 根，不再固定抓 300 根。→ 不要加不設上限的迴圈 fetch。
 3. **Subrequest 上限**：通知走 Queue 就是為了避開掃描路徑的 subrequest 限制。→ 不要把通知改回掃描時同步直發。
 4. **Worker 端禁用 Binance**（403）。Worker 使用 OKX + Gate，瀏覽器獨立模式才能用 Binance。
 5. **策略行為改動**（停損/停利/分批/開倉條件）屬於使用者的交易決策 → 除非使用者明確要求，不要「順手優化」。
