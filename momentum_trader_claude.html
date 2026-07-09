@@ -424,7 +424,19 @@ const RECENT_SIGNAL_TTL_MS = 30 * 60 * 1000;
 const RECENT_SIGNAL_LIMIT = 50;
 const LIVE_REFRESH_MS = 30000;
 const RUNNER_STALE_MS = 10 * 60 * 1000;
-const SCAN_STALE_WARN_MS = 20 * 60 * 1000;
+// 掃描分批進行（每次 tick 只評估 cfg.scanBatchSize 個標的），完整跑完 cfg.maxKlineScans
+// 個標的本來就要好幾個 tick。固定 20 分鐘的門檻沒跟上這個節奏，會對正常運作發假警報；
+// 改成依目前 cfg 動態估算「完整一輪掃描」的理論耗時，抓 1.5 倍當緩衝。
+const SCAN_STALE_WARN_FALLBACK_MS = 20 * 60 * 1000;
+const SCAN_TICK_INTERVAL_ESTIMATE_MS = 5 * 60 * 1000; // 對應 worker cron 排程（見 worker/wrangler.toml）
+function scanStaleWarnMs(cfg){
+  if(!cfg) return SCAN_STALE_WARN_FALLBACK_MS;
+  const batchSize = Math.max(1, Number(cfg.scanBatchSize) || 4);
+  const planSize = Math.max(batchSize, Number(cfg.maxKlineScans) || 16);
+  const batches = Math.ceil(planSize / batchSize);
+  const idleMs = Number(cfg.scanStaleMs) || 0;
+  return Math.round((batches * SCAN_TICK_INTERVAL_ESTIMATE_MS + idleMs) * 1.5);
+}
 const BROWSER_NOTIFY_ENABLED_KEY = 'momentumBrowserNotificationsEnabled';
 const BROWSER_NOTIFY_SEEN_KEY = 'momentumLastBrowserNotificationId';
 const TZ = 'Asia/Taipei';
@@ -633,7 +645,7 @@ function updateRunnerStatus(){
     el.classList.add('stale');
     return;
   }
-  if(lastScanAt && scanAge > SCAN_STALE_WARN_MS){
+  if(lastScanAt && scanAge > scanStaleWarnMs(state.cfg)){
     el.textContent = `掃描延遲 ${ageLabel(lastScanAt)} · tick ${tw(lastRunAt)}`;
     el.classList.add('warn');
     return;
