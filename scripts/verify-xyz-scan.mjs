@@ -18,7 +18,7 @@ function extractFunction(source, name) {
 }
 
 const source = readFileSync('worker/src/index.js', 'utf8');
-const dependencyNames = ['positiveInt', 'anomalyScore', 'rotatingSlice', 'buildTickerSnapshot'];
+const dependencyNames = ['positiveInt', 'anomalyScore', 'rotatingSlice', 'buildTickerSnapshot', 'fillCryptoScanBudget'];
 const ranked = [
   ...Array.from({ length: 60 }, (_, index) => ({
     instId: `TOKEN${index}-USDT-SWAP`,
@@ -102,4 +102,20 @@ assert.equal(second.tickers.filter((ticker) => ticker.marketProvider === 'xyz').
 assert.equal(second.meta.xyzCoreScanned, 0);
 assert.notEqual(second.meta.nextXyzCursor, first.meta.nextXyzCursor);
 
-console.log('XYZ scan allocation checks passed (16 total, 4 XYZ reserved, anomaly/core/rotation coverage)');
+const reserveState = {
+  cfg: {
+    ...cfg,
+    anomalyScanLimit: 2,
+    coreScanLimit: 1,
+    extendedScanBatch: 1,
+  },
+  lastCoreScanAt: 0,
+  scanCursor: 0,
+  xyzScanCursor: 0,
+  tickerSnapshot: null,
+};
+const reserveFilled = await scanUniverse(reserveState);
+assert.equal(reserveFilled.tickers.length, 16);
+assert.ok(reserveFilled.tickers.some((ticker) => ticker.universeTier === 'reserve'));
+
+console.log('XYZ scan allocation checks passed (16 total, reserve fill, XYZ anomaly/core/rotation coverage)');
