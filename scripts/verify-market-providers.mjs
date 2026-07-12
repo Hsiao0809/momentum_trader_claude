@@ -28,12 +28,26 @@ const functionNames = [
   'mergeProviderInstruments',
   'normalizeGateKlines',
   'normalizeXyzKlines',
+  'positionKlineLimit',
+  'positionKlinesAfter',
 ];
 const functions = new Function(
   'GATE_FALLBACK_VOLUME_RATIO',
+  'POSITION_KLINE_LOOKBACK_MIN',
+  'POSITION_KLINE_LOOKBACK_MAX',
+  'INTERVAL_MS',
+  'kTime',
+  'clamp',
   `${functionNames.map((name) => extractFunction(source, name)).join('\n')}
    return { ${functionNames.join(', ')} };`,
-)(0.25);
+)(
+  0.25,
+  8,
+  300,
+  { '15m': 15 * 60 * 1000 },
+  (row) => Number(row[0]),
+  (value, min, max) => Math.max(min, Math.min(max, value)),
+);
 
 const okxRows = Array.from({ length: 12 }, (_, index) => ({
   instId: `TOKEN${index}-USDT-SWAP`,
@@ -127,8 +141,58 @@ assert.match(source, /scanStaleMs: 10 \* 60 \* 1000/);
 assert.match(source, /const willScan = forceScan \|\| scanStale/);
 assert.match(source, /function createScanPlan\(state, rankedResult = null\)/);
 assert.match(source, /plannedScanCount: plan\.tickers\.length/);
-assert.match(source, /POSITION_KLINE_LOOKBACK_MAX = 48/);
+const intervalMs = 15 * 60 * 1000;
+const now = Date.now();
+const currentOpen = Math.floor(now / intervalMs) * intervalMs;
+assert.equal(functions.positionKlineLimit({ lastTime: now - intervalMs }), 8);
+assert.equal(functions.positionKlineLimit({ lastTime: now - 400 * intervalMs }), 300);
+const contiguousRows = [currentOpen - 2 * intervalMs, currentOpen - intervalMs]
+  .map((time) => [time, 1, 1, 1, 1, 1]);
+assert.deepEqual(
+  functions.positionKlinesAfter({ lastTime: currentOpen - 3 * intervalMs }, contiguousRows, now),
+  contiguousRows,
+);
+const missingFirstPosition = { lastTime: currentOpen - 4 * intervalMs };
+assert.throws(
+  () => functions.positionKlinesAfter(
+    missingFirstPosition,
+    [[currentOpen - 2 * intervalMs, 1, 1, 1, 1, 1]],
+    now,
+  ),
+  (error) => error.code === 'position_history_gap' && error.details.missingBars === 1,
+);
+assert.equal(missingFirstPosition.lastTime, currentOpen - 4 * intervalMs);
+assert.throws(
+  () => functions.positionKlinesAfter(
+    { lastTime: currentOpen - 5 * intervalMs },
+    [currentOpen - 4 * intervalMs, currentOpen - 2 * intervalMs, currentOpen - intervalMs]
+      .map((time) => [time, 1, 1, 1, 1, 1]),
+    now,
+  ),
+  (error) => error.code === 'position_history_gap'
+    && error.details.expectedTime === currentOpen - 3 * intervalMs,
+);
+assert.deepEqual(
+  functions.positionKlinesAfter(
+    { entryTime: currentOpen - 2 * intervalMs + 2 * 60 * 1000 },
+    [[currentOpen - intervalMs, 1, 1, 1, 1, 1]],
+    now,
+  ),
+  [[currentOpen - intervalMs, 1, 1, 1, 1, 1]],
+);
+assert.throws(
+  () => functions.positionKlinesAfter(
+    { lastTime: currentOpen - 4 * intervalMs },
+    [currentOpen - 3 * intervalMs, currentOpen - 2 * intervalMs]
+      .map((time) => [time, 1, 1, 1, 1, 1]),
+    now,
+  ),
+  (error) => error.code === 'position_history_gap'
+    && error.details.expectedTime === currentOpen - intervalMs,
+);
+assert.match(source, /POSITION_KLINE_LOOKBACK_MAX = 300/);
 assert.match(source, /marketKlines\(provider, instId, '15m', positionKlineLimit\(p\)\)/);
+assert.match(source, /new entries paused until candle history is continuous/);
 assert.match(source, /type: 'metaAndAssetCtxs', dex: 'xyz'/);
 assert.match(source, /type: 'candleSnapshot'/);
 assert.match(source, /marketProvider: sig\.marketProvider/);

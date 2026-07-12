@@ -2312,6 +2312,17 @@ function setupPnlChart(){
     }, 120);
   });
 }
+function runnerErrorSummary(runnerState){
+  const historyGapSymbols = (runnerState.positionHistoryGaps || []).map(gap => gap.symbol).filter(Boolean);
+  const historyGapError = historyGapSymbols.length ? `position_history_gap: ${historyGapSymbols.join(', ')}` : '';
+  const otherError = runnerState.lastError && !String(runnerState.lastError).startsWith('position_history_gap')
+    ? runnerState.lastError
+    : '';
+  return {
+    label: historyGapError ? '持倉資料缺口' : '掃描失敗',
+    text: [historyGapError, otherError].filter(Boolean).join(' · '),
+  };
+}
 function paintAll(){
   updateRunnerStatus();
   const bt = state.backtest;
@@ -2355,10 +2366,11 @@ function paintAll(){
     const btcHealth = meta.btcContextOk === false ? ' · BTC資料失敗' : '';
     const universeHealth = meta.universeSource === 'cached' ? ' · Universe使用快取' : '';
     const degraded = Number(meta.failedScanCount || 0) > 0 || meta.btcContextOk === false || meta.universeSource !== 'live';
-    signalSummary.textContent = state.lastError
-      ? `掃描失敗 · ${state.lastError} · 上次成功 ${state.lastScanAt ? tw(state.lastScanAt) : '尚未'}`
+    const runnerError = runnerErrorSummary(state);
+    signalSummary.textContent = runnerError.text
+      ? `${runnerError.label} · ${runnerError.text} · 上次成功掃描 ${state.lastScanAt ? tw(state.lastScanAt) : '尚未'}`
       : `本輪 ${currentSignals.length} · 近30分 ${candidateSignals.length}${health}${gateHealth}${xyzHealth}${reasonHealth ? ` · ${reasonHealth}` : ''}${providerError}${btcHealth}${universeHealth} · 掃描 ${state.lastScanAt ? tw(state.lastScanAt) : '尚未'}`;
-    signalSummary.style.color = state.lastError ? 'var(--red)' : degraded ? 'var(--accent)' : '';
+    signalSummary.style.color = runnerError.text ? 'var(--red)' : degraded ? 'var(--accent)' : '';
   }
   const priceStatus = document.getElementById('priceStatus');
   if(priceStatus) priceStatus.textContent = latestPriceAt ? `最新價格：${twFull(latestPriceAt)}` : '最新價格：尚未更新';

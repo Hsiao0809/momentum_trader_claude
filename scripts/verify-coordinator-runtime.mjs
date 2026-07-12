@@ -40,10 +40,12 @@ assert.match(worker, /metaAndAssetCtxs', dex: 'xyz' \}, 0, 1/);
 const createIndex = worker.indexOf('let plan = await createScanPlan(state)');
 const completeIndex = worker.indexOf('while (plan.cursor < plan.tickers.length)', createIndex);
 const finalizeIndex = worker.indexOf('finalizeScanPlan(state, plan)', completeIndex);
-const latestIndex = worker.indexOf('latestEntryPrices(state, state.signals)', finalizeIndex);
-const openIndex = worker.indexOf('openNewPositions(state, this.env, latestPrices)', latestIndex);
+const safeOpenIndex = worker.indexOf('openNewPositionsAfterUpdate(state, this.env, onlyScan, positionUpdate)', finalizeIndex);
+const latestIndex = worker.indexOf('latestEntryPrices(state, state.signals)', safeOpenIndex);
+const openIndex = worker.indexOf('openNewPositions(state, env, latestPrices)', latestIndex);
 assert.ok(createIndex > 0 && completeIndex > createIndex && finalizeIndex > completeIndex);
-assert.ok(latestIndex > finalizeIndex && openIndex > latestIndex, 'full scan must sort before latest-price opening');
+assert.ok(safeOpenIndex > finalizeIndex, 'full scan must sort before the safe opening gate');
+assert.ok(latestIndex > safeOpenIndex && openIndex > latestIndex, 'safe opening must fetch latest prices before entry');
 
 const finalizeSource = extractFunction(worker, 'finalizeScanPlan');
 const finalize = Function(

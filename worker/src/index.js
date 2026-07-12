@@ -17,7 +17,7 @@ const GATE_MIN_QUOTE_VOLUME = 5_000_000;
 const GATE_FALLBACK_VOLUME_RATIO = 0.25;
 const XYZ_MIN_QUOTE_VOLUME = 5_000_000;
 const POSITION_KLINE_LOOKBACK_MIN = 8;
-const POSITION_KLINE_LOOKBACK_MAX = 48;
+const POSITION_KLINE_LOOKBACK_MAX = 300;
 const COMPLETE_SCAN_BATCH_SIZE = 2;
 
 const LABELS = {
@@ -250,7 +250,10 @@ export class PaperCoordinator extends DurableObject {
         return { skipped: true, reason: 'paper-stopped' };
       }
 
-      await updatePositions(state, { markToMarket: !willScan });
+      const positionUpdate = applyPositionUpdateStatus(
+        state,
+        await updatePositions(state, { markToMarket: !willScan }),
+      );
       if (willScan) {
         let plan = await createScanPlan(state);
         while (plan.cursor < plan.tickers.length) {
@@ -259,13 +262,16 @@ export class PaperCoordinator extends DurableObject {
         finalizeScanPlan(state, plan);
       }
 
-      if (state.running && !onlyScan) {
-        const latestPrices = await latestEntryPrices(state, state.signals);
-        await openNewPositions(state, this.env, latestPrices);
-      }
+      await openNewPositionsAfterUpdate(state, this.env, onlyScan, positionUpdate);
       state.forceScanRequested = false;
       state.manualScanOnly = false;
-      state.lastError = null;
+      if (positionUpdate.historyGaps.length) {
+        const symbols = positionUpdate.historyGaps.map((gap) => gap.symbol).join(', ');
+        state.lastError = `position_history_gap: ${symbols}; new entries paused until candle history is continuous`;
+        state.lastErrorAt = Date.now();
+      } else {
+        state.lastError = null;
+      }
       await this.saveStoredState(state);
       return {
         ok: true,
@@ -454,6 +460,7 @@ function defaultState() {
     tickerSnapshot: null,
     lastRunAt: 0,
     lastError: null,
+    positionHistoryGaps: [],
     marketProvider: 'okx+gate+xyz-perpetuals',
     cfg: { ...DEFAULT_CFG },
   };
@@ -494,6 +501,7 @@ function normalizeState(state) {
     equityCurve: Array.isArray(state.equityCurve) ? state.equityCurve : [],
     notificationLog: Array.isArray(state.notificationLog) ? state.notificationLog.slice(0, 100) : [],
     pendingNotifications: Array.isArray(state.pendingNotifications) ? state.pendingNotifications.slice(0, 20) : [],
+    positionHistoryGaps: Array.isArray(state.positionHistoryGaps) ? state.positionHistoryGaps : [],
     scanPlan: normalizeScanPlan(state.scanPlan),
   };
   normalizeStrategyLabels(normalized.signals);
@@ -867,11 +875,24 @@ async function updatePositions(state, options = {}) {
   return updatePositionIds(state, state.positions.map((position) => position.id), options);
 }
 
+function applyPositionUpdateStatus(state, positionUpdate) {
+  state.positionHistoryGaps = positionUpdate.historyGaps;
+  return positionUpdate;
+}
+
+async function openNewPositionsAfterUpdate(state, env, onlyScan, positionUpdate) {
+  if (!state.running || onlyScan || positionUpdate.historyGaps.length) return false;
+  const latestPrices = await latestEntryPrices(state, state.signals);
+  await openNewPositions(state, env, latestPrices);
+  return true;
+}
+
 async function updatePositionIds(state, positionIds, options = {}) {
-  if (!state.positions.length || !positionIds.length) return;
+  if (!state.positions.length || !positionIds.length) return { historyGaps: [] };
   const markToMarket = options.markToMarket !== false;
   const selectedIds = new Set(positionIds);
   const closedIds = new Set();
+  const historyGaps = [];
 
   for (const p of state.positions.filter((position) => selectedIds.has(position.id))) {
     let closed = false;
@@ -879,8 +900,9 @@ async function updatePositionIds(state, positionIds, options = {}) {
       const provider = p.marketProvider || providerFromInstId(p.instId);
       const instId = p.instId || instIdFromSymbol(p.symbol, provider);
       const rows = closedKlines(await marketKlines(provider, instId, '15m', positionKlineLimit(p)));
-      for (const bar of rows) {
-        if (kTime(bar) <= p.lastTime) continue;
+      const pendingRows = positionKlinesAfter(p, rows);
+      delete p.historyGap;
+      for (const bar of pendingRows) {
         p.lastTime = kTime(bar);
         const high = kHigh(bar);
         const low = kLow(bar);
@@ -930,6 +952,18 @@ async function updatePositionIds(state, positionIds, options = {}) {
         }
       }
     } catch (error) {
+      if (error.code === 'position_history_gap') {
+        const gap = {
+          ...error.details,
+          symbol: p.symbol,
+          provider: p.marketProvider || providerFromInstId(p.instId),
+          detectedAt: Date.now(),
+        };
+        p.historyGap = gap;
+        historyGaps.push(gap);
+      } else if (p.historyGap) {
+        historyGaps.push(p.historyGap);
+      }
       console.warn('position update failed', p.symbol, error);
     }
 
@@ -937,6 +971,7 @@ async function updatePositionIds(state, positionIds, options = {}) {
     await sleep(20);
   }
   if (closedIds.size) state.positions = state.positions.filter((position) => !closedIds.has(position.id));
+  return { historyGaps };
 }
 
 async function scanUniverse(state, rankedResult = null) {
@@ -2154,6 +2189,35 @@ function positionKlineLimit(position) {
   if (!lastTime) return POSITION_KLINE_LOOKBACK_MAX;
   const missingBars = Math.ceil(Math.max(0, Date.now() - lastTime) / INTERVAL_MS['15m']);
   return clamp(missingBars + 4, POSITION_KLINE_LOOKBACK_MIN, POSITION_KLINE_LOOKBACK_MAX);
+}
+
+function positionKlinesAfter(position, rows, now = Date.now()) {
+  const lastTime = Number(position?.lastTime || position?.entryTime || 0);
+  const pendingRows = rows.filter((row, index) => (
+    kTime(row) > lastTime && (!index || kTime(row) !== kTime(rows[index - 1]))
+  ));
+  if (!lastTime) return pendingRows;
+
+  const intervalMs = INTERVAL_MS['15m'];
+  const expectedTime = Math.floor(lastTime / intervalMs) * intervalMs + intervalMs;
+  const latestClosedTime = Math.floor(now / intervalMs) * intervalMs - intervalMs;
+  const firstMismatch = pendingRows.find((row, index) => kTime(row) !== expectedTime + index * intervalMs);
+  const trailingGap = pendingRows.length && kTime(pendingRows[pendingRows.length - 1]) < latestClosedTime;
+  if (expectedTime <= latestClosedTime && (!pendingRows.length || firstMismatch || trailingGap)) {
+    const firstAvailableTime = firstMismatch ? kTime(firstMismatch) : null;
+    const mismatchIndex = firstMismatch ? pendingRows.indexOf(firstMismatch) : pendingRows.length;
+    const missingStartTime = expectedTime + mismatchIndex * intervalMs;
+    const missingEndTime = firstAvailableTime ? firstAvailableTime - intervalMs : latestClosedTime;
+    const missingBars = Math.floor((missingEndTime - missingStartTime) / intervalMs) + 1;
+    const error = new Error(
+      `position_history_gap: expected ${new Date(missingStartTime).toISOString()}, `
+      + `first available ${firstAvailableTime ? new Date(firstAvailableTime).toISOString() : 'none'}`,
+    );
+    error.code = 'position_history_gap';
+    error.details = { lastTime, expectedTime: missingStartTime, firstAvailableTime, missingBars };
+    throw error;
+  }
+  return pendingRows;
 }
 
 function atrPct(rows, period = 14) {
