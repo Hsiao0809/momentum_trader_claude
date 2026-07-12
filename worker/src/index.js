@@ -19,6 +19,7 @@ const XYZ_MIN_QUOTE_VOLUME = 5_000_000;
 const POSITION_KLINE_LOOKBACK_MIN = 8;
 const POSITION_KLINE_LOOKBACK_MAX = 300;
 const COMPLETE_SCAN_BATCH_SIZE = 2;
+const SCAN_CONTINUATION_DELAY_MS = 1_000;
 const OKX_RATE_LIMIT_COOLDOWN_MS = 10 * 60 * 1000;
 const OKX_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
 
@@ -233,6 +234,71 @@ export class PaperCoordinator extends DurableObject {
     return pending;
   }
 
+  async scheduleScanContinuation() {
+    await this.ctx.storage.setAlarm(Date.now() + SCAN_CONTINUATION_DELAY_MS);
+  }
+
+  async savePendingScan(state, plan) {
+    state.scanPlan = plan;
+    state.forceScanRequested = false;
+    state.manualScanOnly = false;
+    await this.saveStoredState(state);
+    await this.scheduleScanContinuation();
+    return {
+      ok: true,
+      scanPending: true,
+      stateVersion: state.stateVersion,
+      scannedCount: Number(plan.cursor || 0),
+      plannedScanCount: plan.tickers.length,
+      openPositions: state.positions.length,
+    };
+  }
+
+  async completeScan(state, plan) {
+    const onlyScan = Boolean(plan.onlyScan);
+    finalizeScanPlan(state, plan);
+    const positionUpdate = { historyGaps: state.positionHistoryGaps || [] };
+    await openNewPositionsAfterUpdate(state, this.env, onlyScan, positionUpdate);
+    state.forceScanRequested = false;
+    state.manualScanOnly = false;
+    if (positionUpdate.historyGaps.length) {
+      const symbols = positionUpdate.historyGaps.map((gap) => gap.symbol).join(', ');
+      state.lastError = `position_history_gap: ${symbols}; new entries paused until candle history is continuous`;
+      state.lastErrorAt = Date.now();
+    } else {
+      state.lastError = null;
+    }
+    await this.saveStoredState(state);
+    return {
+      ok: true,
+      scanPending: false,
+      stateVersion: state.stateVersion,
+      scannedCount: state.scanMeta?.scannedCount || 0,
+      signalCount: state.signals.length,
+      openPositions: state.positions.length,
+    };
+  }
+
+  async continueScan() {
+    const state = await this.storedState();
+    if (!hasActiveScanPlan(state)) return { ok: true, skipped: true, reason: 'no-active-scan' };
+    try {
+      const plan = await advanceScanPlan(state, state.scanPlan);
+      if (plan.cursor < plan.tickers.length) return this.savePendingScan(state, plan);
+      return this.completeScan(state, plan);
+    } catch (error) {
+      state.lastError = `${error.message || error}`;
+      state.lastErrorAt = Date.now();
+      if (state.lastError === 'Scan plan expired before publication') state.scanPlan = null;
+      await this.saveStoredState(state).catch(() => {});
+      throw error;
+    }
+  }
+
+  async alarm() {
+    return this.enqueue(() => this.continueScan());
+  }
+
   async runTick(options = {}) {
     const now = Date.now();
     const state = await this.storedState();
@@ -243,6 +309,19 @@ export class PaperCoordinator extends DurableObject {
 
       recoverLastFailedNotification(state);
       if (await flushPendingNotifications(state, this.env)) await this.saveStoredState(state);
+
+      if (hasActiveScanPlan(state)) {
+        await this.saveStoredState(state);
+        await this.scheduleScanContinuation();
+        return {
+          ok: true,
+          scanPending: true,
+          stateVersion: state.stateVersion,
+          scannedCount: Number(state.scanPlan.cursor || 0),
+          plannedScanCount: state.scanPlan.tickers.length,
+          openPositions: state.positions.length,
+        };
+      }
 
       const forceScan = Boolean(options.forceScan || state.forceScanRequested);
       const onlyScan = Boolean(options.onlyScan || state.manualScanOnly);
@@ -258,17 +337,11 @@ export class PaperCoordinator extends DurableObject {
       );
       if (willScan) {
         let plan = await createScanPlan(state);
-        let rebuiltForOkxRateLimit = false;
-        while (plan.cursor < plan.tickers.length) {
-          plan = await scanSignalPlanBatch(plan, state.cfg, COMPLETE_SCAN_BATCH_SIZE);
-          if (!rebuiltForOkxRateLimit && Number(plan.okxRateLimitUntil || 0) > Date.now()) {
-            // Rebuild immediately from Gate/XYZ rather than publishing a mixed or incomplete plan.
-            state.okxRateLimitUntil = plan.okxRateLimitUntil;
-            plan = await createScanPlan(state);
-            rebuiltForOkxRateLimit = true;
-          }
-        }
-        finalizeScanPlan(state, plan);
+        assertCompleteScanUniverse(state, plan);
+        plan.onlyScan = onlyScan;
+        plan = await advanceScanPlan(state, plan);
+        if (plan.cursor < plan.tickers.length) return this.savePendingScan(state, plan);
+        return this.completeScan(state, plan);
       }
 
       await openNewPositionsAfterUpdate(state, this.env, onlyScan, positionUpdate);
@@ -553,6 +626,9 @@ function normalizeScanPlan(plan) {
     failedScanCount: Math.max(0, Number(plan.failedScanCount || 0)),
     failedSymbols: Array.isArray(plan.failedSymbols) ? plan.failedSymbols.slice(0, 8) : [],
     failedReasonCounts: plan.failedReasonCounts && typeof plan.failedReasonCounts === 'object' ? plan.failedReasonCounts : {},
+    okxRateLimitUntil: Math.max(0, Number(plan.okxRateLimitUntil || 0)),
+    rebuiltForOkxRateLimit: Boolean(plan.rebuiltForOkxRateLimit),
+    onlyScan: Boolean(plan.onlyScan),
   };
 }
 
@@ -652,6 +728,37 @@ async function createScanPlan(state, rankedResult = null) {
     failedReasonCounts: {},
     okxRateLimitUntil: Number(state.okxRateLimitUntil || 0),
   };
+}
+
+function assertCompleteScanUniverse(state, plan) {
+  const requiredCount = positiveInt(state.cfg.maxKlineScans, DEFAULT_CFG.maxKlineScans);
+  if (plan.tickers.length !== requiredCount) {
+    throw new Error(`Incomplete scan universe: ${plan.tickers.length}/${requiredCount}`);
+  }
+}
+
+async function advanceScanPlan(state, plan) {
+  const previousFailedCount = Number(plan.failedScanCount || 0);
+  const next = await scanSignalPlanBatch(plan, state.cfg, COMPLETE_SCAN_BATCH_SIZE, false);
+  const okxCoolingDown = Number(next.okxRateLimitUntil || 0) > Date.now();
+  const containsOkx = next.tickers.some((ticker) => ticker.marketProvider === 'okx');
+  if (okxCoolingDown && containsOkx && !plan.rebuiltForOkxRateLimit) {
+    state.okxRateLimitUntil = next.okxRateLimitUntil;
+    const rebuilt = await createScanPlan(state);
+    assertCompleteScanUniverse(state, rebuilt);
+    rebuilt.onlyScan = Boolean(plan.onlyScan);
+    rebuilt.rebuiltForOkxRateLimit = true;
+    return rebuilt;
+  }
+  if (Number(next.failedScanCount || 0) > previousFailedCount) {
+    const reasons = Object.entries(next.failedReasonCounts || {})
+      .map(([reason, count]) => `${reason}:${count}`)
+      .join(', ');
+    throw new Error(`Scan batch failed: ${reasons || 'unknown'}`);
+  }
+  next.onlyScan = Boolean(plan.onlyScan);
+  next.rebuiltForOkxRateLimit = Boolean(plan.rebuiltForOkxRateLimit);
+  return next;
 }
 
 async function scanSignals(state, options = {}) {
@@ -974,6 +1081,9 @@ async function updatePositionIds(state, positionIds, options = {}) {
         }
       }
     } catch (error) {
+      if (scanFailureReason(error) === 'okx_rate_limit') {
+        state.okxRateLimitUntil = Date.now() + OKX_RATE_LIMIT_COOLDOWN_MS;
+      }
       if (error.code === 'position_history_gap') {
         const gap = {
           ...error.details,
@@ -1091,7 +1201,8 @@ async function scanUniverse(state, rankedResult = null) {
     [...anomaly, ...extended, ...core].map((ticker) => [ticker.instId, ticker]),
   ).values()];
   const cryptoBudget = Math.max(0, maxKlineScans - xyzSelected.length);
-  const deduped = [...cryptoCandidates.slice(0, cryptoBudget), ...xyzSelected].slice(0, maxKlineScans);
+  const cryptoSelected = fillCryptoScanBudget(cryptoCandidates, cryptoRanked, cryptoBudget);
+  const deduped = [...cryptoSelected, ...xyzSelected].slice(0, maxKlineScans);
 
   if (coreDue && deduped.some((ticker) => ticker.universeTier === 'core')) state.lastCoreScanAt = now;
   if (universeSource !== 'cached') state.tickerSnapshot = buildTickerSnapshot(ranked, providerMeta);
@@ -1131,6 +1242,17 @@ async function scanUniverse(state, rankedResult = null) {
       nextXyzCursor,
     },
   };
+}
+
+function fillCryptoScanBudget(primary, ranked, budget) {
+  const selected = new Map(primary.map((ticker) => [ticker.instId, ticker]));
+  for (const ticker of ranked) {
+    if (selected.size >= budget) break;
+    if (!selected.has(ticker.instId)) {
+      selected.set(ticker.instId, { ...ticker, universeTier: 'reserve' });
+    }
+  }
+  return [...selected.values()].slice(0, budget);
 }
 
 async function rankedInstruments(cfg, options = {}) {

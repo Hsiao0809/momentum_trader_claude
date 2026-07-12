@@ -39,7 +39,7 @@ const functions = new Function(
   'INTERVAL_MS', 'marketKlines', 'closedKlines', 'providerFromInstId', 'instIdFromSymbol',
   'positionKlineLimit', 'kTime', 'kHigh', 'kLow', 'kClose', 'recordProtectionEvents',
   'takeBreakEvenPartial', 'effectiveStopFor', 'stopReasonFor', 'closePosition', 'takeTP1',
-  'tickerPrice', 'sleep', 'console',
+  'tickerPrice', 'sleep', 'scanFailureReason', 'OKX_RATE_LIMIT_COOLDOWN_MS', 'console',
   `${extractFunction(source, 'positionKlinesAfter')}
    ${extractFunction(source, 'updatePositionIds', 'async function')}
    return { positionKlinesAfter, updatePositionIds };`,
@@ -62,6 +62,8 @@ const functions = new Function(
   () => { throw new Error('unexpected TP1'); },
   async () => { throw new Error('unexpected ticker'); },
   async () => {},
+  () => 'other',
+  10 * 60 * 1000,
   { warn: () => {} },
 );
 

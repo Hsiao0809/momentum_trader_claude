@@ -6,7 +6,9 @@ const html = await readFile('momentum_trader_claude.html', 'utf8');
 const wrangler = await readFile('worker/wrangler.toml', 'utf8');
 
 function extractFunction(source, name) {
-  const start = source.indexOf(`function ${name}(`);
+  const asyncStart = source.indexOf(`async function ${name}(`);
+  const functionStart = source.indexOf(`function ${name}(`);
+  const start = asyncStart >= 0 ? asyncStart : functionStart;
   assert.notEqual(start, -1, `${name} must exist`);
   const brace = source.indexOf('{', start);
   let depth = 0;
@@ -28,24 +30,102 @@ assert.match(worker, /return this\.enqueue\(async \(\) =>/);
 assert.match(worker, /this\.enqueue\(\(\) => this\.runTick\(options\)\)/);
 assert.match(worker, /paper-coordinator\/control\$\{url\.pathname\}/);
 assert.match(worker, /STATE_CHUNK_BYTES = 1_500_000/);
+assert.match(worker, /SCAN_CONTINUATION_DELAY_MS = 1_000/);
 assert.match(worker, /this\.ctx\.storage\.transaction/);
+assert.match(worker, /this\.ctx\.storage\.setAlarm\(Date\.now\(\) \+ SCAN_CONTINUATION_DELAY_MS\)/);
+assert.match(worker, /async alarm\(\)/);
+assert.doesNotMatch(worker, /while \(plan\.cursor < plan\.tickers\.length\)/);
 assert.match(worker, /Paper state chunk length mismatch/);
 assert.match(worker, /successfulScanCount < plan\.tickers\.length/);
 assert.match(worker, /plan\.tickers\.length !== requiredCount/);
+assert.match(worker, /universeTier: 'reserve'/);
+assert.match(worker, /fillCryptoScanBudget\(cryptoCandidates, cryptoRanked, cryptoBudget\)/);
 assert.match(worker, /Scan plan expired before publication/);
 assert.match(worker, /batchScannedCount: plan\.tickers\.length/);
 assert.match(worker, /market\/ticker', \{ instId \}, 0, 0/);
 assert.match(worker, /metaAndAssetCtxs', dex: 'xyz' \}, 0, 1/);
 
 const createIndex = worker.indexOf('let plan = await createScanPlan(state)');
-const completeIndex = worker.indexOf('while (plan.cursor < plan.tickers.length)', createIndex);
-const finalizeIndex = worker.indexOf('finalizeScanPlan(state, plan)', completeIndex);
+const advanceIndex = worker.indexOf('plan = await advanceScanPlan(state, plan)', createIndex);
+const pendingIndex = worker.indexOf('return this.savePendingScan(state, plan)', advanceIndex);
+const completeMethodIndex = worker.indexOf('async completeScan(state, plan)');
+const finalizeIndex = worker.indexOf('finalizeScanPlan(state, plan)', completeMethodIndex);
 const safeOpenIndex = worker.indexOf('openNewPositionsAfterUpdate(state, this.env, onlyScan, positionUpdate)', finalizeIndex);
 const latestIndex = worker.indexOf('latestEntryPrices(state, state.signals)', safeOpenIndex);
 const openIndex = worker.indexOf('openNewPositions(state, env, latestPrices)', latestIndex);
-assert.ok(createIndex > 0 && completeIndex > createIndex && finalizeIndex > completeIndex);
+assert.ok(createIndex > 0 && advanceIndex > createIndex && pendingIndex > advanceIndex);
+assert.ok(completeMethodIndex > 0 && finalizeIndex > completeMethodIndex);
 assert.ok(safeOpenIndex > finalizeIndex, 'full scan must sort before the safe opening gate');
 assert.ok(latestIndex > safeOpenIndex && openIndex > latestIndex, 'safe opening must fetch latest prices before entry');
+
+const fillCryptoScanBudgetSource = extractFunction(worker, 'fillCryptoScanBudget');
+const fillCryptoScanBudget = Function(
+  `${fillCryptoScanBudgetSource}; return fillCryptoScanBudget;`,
+)();
+const filledCrypto = fillCryptoScanBudget(
+  [{ instId: 'A', universeTier: 'anomaly' }],
+  [{ instId: 'A' }, { instId: 'B' }, { instId: 'C' }, { instId: 'D' }],
+  3,
+);
+assert.deepEqual(filledCrypto.map((ticker) => ticker.instId), ['A', 'B', 'C']);
+assert.deepEqual(filledCrypto.map((ticker) => ticker.universeTier), ['anomaly', 'reserve', 'reserve']);
+
+const advanceScanPlanSource = extractFunction(worker, 'advanceScanPlan');
+const makeAdvanceScanPlan = (scanBatch, createPlan, assertUniverse = () => {}) => Function(
+  'scanSignalPlanBatch',
+  'COMPLETE_SCAN_BATCH_SIZE',
+  'createScanPlan',
+  'assertCompleteScanUniverse',
+  `${advanceScanPlanSource}; return advanceScanPlan;`,
+)(scanBatch, 2, createPlan, assertUniverse);
+const basePlan = {
+  cursor: 0,
+  tickers: Array.from({ length: 16 }, (_, index) => ({
+    instId: `OKX-${index}`,
+    marketProvider: 'okx',
+  })),
+  failedScanCount: 0,
+  failedReasonCounts: {},
+  onlyScan: true,
+};
+const advancedPlan = await makeAdvanceScanPlan(
+  async (plan) => ({ ...plan, cursor: plan.cursor + 2 }),
+  async () => { throw new Error('unexpected rebuild'); },
+)({ cfg: {} }, basePlan);
+assert.equal(advancedPlan.cursor, 2, 'one continuation must process exactly one batch');
+assert.equal(advancedPlan.onlyScan, true);
+
+const cooldownUntil = Date.now() + 60_000;
+const gatePlan = {
+  ...basePlan,
+  cursor: 0,
+  tickers: basePlan.tickers.map((ticker, index) => ({ ...ticker, instId: `GATE-${index}`, marketProvider: 'gate' })),
+};
+const cooldownState = { cfg: {}, okxRateLimitUntil: 0 };
+const rebuiltPlan = await makeAdvanceScanPlan(
+  async (plan) => ({
+    ...plan,
+    cursor: 2,
+    failedScanCount: 1,
+    failedReasonCounts: { okx_rate_limit: 1 },
+    okxRateLimitUntil: cooldownUntil,
+  }),
+  async () => ({ ...gatePlan }),
+)(cooldownState, basePlan);
+assert.equal(rebuiltPlan.cursor, 0);
+assert.equal(rebuiltPlan.rebuiltForOkxRateLimit, true);
+assert.equal(rebuiltPlan.onlyScan, true);
+assert.equal(cooldownState.okxRateLimitUntil, cooldownUntil);
+
+await assert.rejects(() => makeAdvanceScanPlan(
+  async (plan) => ({
+    ...plan,
+    cursor: 2,
+    failedScanCount: 1,
+    failedReasonCounts: { gate_rate_limit: 1 },
+  }),
+  async () => { throw new Error('unexpected rebuild'); },
+)({ cfg: {} }, basePlan), /Scan batch failed: gate_rate_limit:1/);
 
 const finalizeSource = extractFunction(worker, 'finalizeScanPlan');
 const finalize = Function(
