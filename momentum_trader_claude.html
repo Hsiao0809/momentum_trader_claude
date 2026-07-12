@@ -2356,6 +2356,9 @@ function paintAll(){
       reasonCounts.other ? `其他 ${reasonCounts.other}` : '',
     ].filter(Boolean).join(' / ');
     const providers = meta.providerMeta || {};
+    const okxCooldown = providers.okxCoolingDown && Number(providers.okxRateLimitUntil) > nowMs()
+      ? ` · OKX 限流冷卻至 ${twFull(Number(providers.okxRateLimitUntil))}`
+      : '';
     const gateHealth = Number.isFinite(Number(providers.gateExclusive))
       ? ` · Gate獨有 ${providers.gateExclusive}（門檻 ${fmt(Number(providers.gateMinQuoteVolume || 0) / 1000000, 1)}M）`
       : '';
@@ -2369,7 +2372,7 @@ function paintAll(){
     const runnerError = runnerErrorSummary(state);
     signalSummary.textContent = runnerError.text
       ? `${runnerError.label} · ${runnerError.text} · 上次成功掃描 ${state.lastScanAt ? tw(state.lastScanAt) : '尚未'}`
-      : `本輪 ${currentSignals.length} · 近30分 ${candidateSignals.length}${health}${gateHealth}${xyzHealth}${reasonHealth ? ` · ${reasonHealth}` : ''}${providerError}${btcHealth}${universeHealth} · 掃描 ${state.lastScanAt ? tw(state.lastScanAt) : '尚未'}`;
+      : `本輪 ${currentSignals.length} · 近30分 ${candidateSignals.length}${health}${gateHealth}${xyzHealth}${reasonHealth ? ` · ${reasonHealth}` : ''}${okxCooldown}${providerError}${btcHealth}${universeHealth} · 掃描 ${state.lastScanAt ? tw(state.lastScanAt) : '尚未'}`;
     signalSummary.style.color = runnerError.text ? 'var(--red)' : degraded ? 'var(--accent)' : '';
   }
   const priceStatus = document.getElementById('priceStatus');

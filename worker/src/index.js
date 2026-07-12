@@ -19,6 +19,8 @@ const XYZ_MIN_QUOTE_VOLUME = 5_000_000;
 const POSITION_KLINE_LOOKBACK_MIN = 8;
 const POSITION_KLINE_LOOKBACK_MAX = 300;
 const COMPLETE_SCAN_BATCH_SIZE = 2;
+const OKX_RATE_LIMIT_COOLDOWN_MS = 10 * 60 * 1000;
+const OKX_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
 
 const LABELS = {
   pullback_uptrend: '上升趨勢回檔',
@@ -256,8 +258,15 @@ export class PaperCoordinator extends DurableObject {
       );
       if (willScan) {
         let plan = await createScanPlan(state);
+        let rebuiltForOkxRateLimit = false;
         while (plan.cursor < plan.tickers.length) {
           plan = await scanSignalPlanBatch(plan, state.cfg, COMPLETE_SCAN_BATCH_SIZE);
+          if (!rebuiltForOkxRateLimit && Number(plan.okxRateLimitUntil || 0) > Date.now()) {
+            // Rebuild immediately from Gate/XYZ rather than publishing a mixed or incomplete plan.
+            state.okxRateLimitUntil = plan.okxRateLimitUntil;
+            plan = await createScanPlan(state);
+            rebuiltForOkxRateLimit = true;
+          }
         }
         finalizeScanPlan(state, plan);
       }
@@ -453,6 +462,7 @@ function defaultState() {
     backtest: null,
     lastScanAt: 0,
     lastCoreScanAt: 0,
+    okxRateLimitUntil: 0,
     scanCursor: 0,
     xyzScanCursor: 0,
     scanPlan: null,
@@ -614,10 +624,17 @@ async function createScanPlan(state, rankedResult = null) {
   let riskOff = false;
   let btcContextOk = true;
   try {
-    const btcRows = await marketKlines('okx', 'BTC-USDT-SWAP', '15m', 130);
-    riskOff = btcRiskOff(btcRows);
+    if (Date.now() >= Number(state.okxRateLimitUntil || 0)) {
+      const btcRows = await marketKlines('okx', 'BTC-USDT-SWAP', '15m', 130);
+      riskOff = btcRiskOff(btcRows);
+    } else {
+      btcContextOk = false;
+    }
   } catch (error) {
     btcContextOk = false;
+    if (scanFailureReason(error) === 'okx_rate_limit') {
+      state.okxRateLimitUntil = Date.now() + OKX_RATE_LIMIT_COOLDOWN_MS;
+    }
     console.warn('BTC risk context failed', error);
   }
   return {
@@ -633,6 +650,7 @@ async function createScanPlan(state, rankedResult = null) {
     failedScanCount: 0,
     failedSymbols: [],
     failedReasonCounts: {},
+    okxRateLimitUntil: Number(state.okxRateLimitUntil || 0),
   };
 }
 
@@ -686,6 +704,9 @@ async function scanSignalPlanBatch(plan, cfg, batchSize, failOnError = true) {
       if (next.failedSymbols.length < 8) next.failedSymbols.push(ticker.symbol);
       const reason = scanFailureReason(error);
       next.failedReasonCounts[reason] = Number(next.failedReasonCounts[reason] || 0) + 1;
+      if (reason === 'okx_rate_limit') {
+        next.okxRateLimitUntil = Date.now() + OKX_RATE_LIMIT_COOLDOWN_MS;
+      }
       console.warn('scan failed', ticker.instId, error);
     }
     await sleep(positiveInt(cfg.scanRequestDelayMs, DEFAULT_CFG.scanRequestDelayMs));
@@ -741,6 +762,7 @@ function finalizeScanPlan(state, plan) {
   state.signals = signals;
   state.recentSignals = mergeRecentSignals(state.recentSignals, signals, state.lastScanAt);
   state.scanCursor = plan.meta.nextCursor;
+  state.okxRateLimitUntil = Number(plan.okxRateLimitUntil || 0);
   state.scanPlan = null;
   return signals;
 }
@@ -993,9 +1015,20 @@ async function scanUniverse(state, rankedResult = null) {
   let providerMeta = {};
   let ranked;
   try {
-    const result = rankedResult || await rankedInstruments(cfg);
+    const result = rankedResult || await rankedInstruments(cfg, {
+      skipOkx: Date.now() < Number(state.okxRateLimitUntil || 0),
+      okxRateLimitUntil: Number(state.okxRateLimitUntil || 0),
+    });
     ranked = result.ranked;
     providerMeta = result.providerMeta;
+    if (/OKX.*(?:429|50011)/.test(String(providerMeta.okxError || ''))) {
+      state.okxRateLimitUntil = Date.now() + OKX_RATE_LIMIT_COOLDOWN_MS;
+      providerMeta = {
+        ...providerMeta,
+        okxCoolingDown: true,
+        okxRateLimitUntil: state.okxRateLimitUntil,
+      };
+    }
     if (providerMeta.okxError || providerMeta.gateError || providerMeta.xyzError) universeSource = 'live-partial';
   } catch (error) {
     ranked = rankedFromTickerSnapshot(state.tickerSnapshot, cfg);
@@ -1100,9 +1133,10 @@ async function scanUniverse(state, rankedResult = null) {
   };
 }
 
-async function rankedInstruments(cfg) {
+async function rankedInstruments(cfg, options = {}) {
+  const okxCoolingDown = Boolean(options.skipOkx);
   const [okxResult, gateResult, xyzResult] = await Promise.allSettled([
-    okx('/api/v5/market/tickers', { instType: 'SWAP' }, 0, 1),
+    okxCoolingDown ? Promise.resolve([]) : okx('/api/v5/market/tickers', { instType: 'SWAP' }),
     gate('/api/v4/futures/usdt/tickers', {}, 0, 1),
     hyperliquidInfo({ type: 'metaAndAssetCtxs', dex: 'xyz' }, 0, 1),
   ]);
@@ -1161,7 +1195,11 @@ async function rankedInstruments(cfg) {
       xyzListed: xyzAll.length,
       xyzEligible: xyzEligible.length,
       xyzMinQuoteVolume: XYZ_MIN_QUOTE_VOLUME,
-      okxError: okxResult.status === 'rejected' ? String(okxResult.reason) : null,
+      okxError: okxCoolingDown
+        ? `OKX cooling down until ${new Date(Number(options.okxRateLimitUntil || 0)).toISOString()}`
+        : okxResult.status === 'rejected' ? String(okxResult.reason) : null,
+      okxCoolingDown,
+      okxRateLimitUntil: okxCoolingDown ? Number(options.okxRateLimitUntil || 0) : 0,
       gateError: gateResult.status === 'rejected' ? String(gateResult.reason) : null,
       xyzError: xyzResult.status === 'rejected' ? String(xyzResult.reason) : null,
     },
@@ -1390,7 +1428,7 @@ function normalizeXyzKlines(rows) {
     .sort((a, b) => a[0] - b[0]);
 }
 
-async function okx(path, params = {}, attempt = 0, maxRetries = 2) {
+async function okx(path, params = {}, attempt = 0, maxRetries = OKX_RETRY_DELAYS_MS.length) {
   const url = new URL(path, OKX_API);
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null) url.searchParams.set(key, value);
@@ -1403,7 +1441,7 @@ async function okx(path, params = {}, attempt = 0, maxRetries = 2) {
     cf: { cacheTtl: 0 },
   });
   if ((response.status === 429 || response.status >= 500) && attempt < maxRetries) {
-    await sleep(500 * (attempt + 1));
+    await sleep(OKX_RETRY_DELAYS_MS[attempt] || OKX_RETRY_DELAYS_MS.at(-1));
     return okx(path, params, attempt + 1, maxRetries);
   }
   if (!response.ok) throw new Error(`OKX ${path} ${response.status}`);
