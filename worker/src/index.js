@@ -922,9 +922,9 @@ async function updatePositionIds(state, positionIds, options = {}) {
         if (!p.tp1Done && (p.side === 'short' ? low <= p.tp1 : high >= p.tp1)) {
           takeTP1(state, p, kTime(bar));
         }
-        // 呆倉踢除：持有 24h 仍未達 +1% 且未觸發任何保護層 → 出場讓位給新訊號
+        // 呆倉踢除：持有 48h 仍未達 +1% 且未觸發任何保護層 → 出場讓位給新訊號（24h 會誤殺慢熱單，見 ZEC 案例）
         const staleProfit = p.side === 'short' ? (p.entry - close) / p.entry : (close - p.entry) / p.entry;
-        if (kTime(bar) >= p.entryTime + 24 * 60 * 60 * 1000 && staleProfit < 0.01 && !p.tp1Done && !p.bePartialDone) {
+        if (kTime(bar) >= p.entryTime + 48 * 60 * 60 * 1000 && staleProfit < 0.01 && !p.tp1Done && !p.bePartialDone) {
           closePosition(state, p, close, 'stale_exit', kTime(bar));
           closed = true;
           break;
