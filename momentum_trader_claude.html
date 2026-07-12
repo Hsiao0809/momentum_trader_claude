@@ -1461,7 +1461,7 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
         reason=tp1Done?'trail_stop':lowest<=risk.lockTrigger?'lock_stop':lowest<=risk.beTrigger?'be_stop':'stop'; break;
       }
       if(!tp1Done && low <= risk.tp1){ const sq=remainingQty*0.5; realized+=sq*(entry-risk.tp1); remainingQty-=sq; tp1Done=true; }
-      if(i - entryIndex >= 96 && close > entry * 0.99 && !tp1Done && !bePartialDone){ exit=close; exitTime=kTime(bar); realized+=remainingQty*(entry-exit); reason='stale_exit'; break; }
+      if(i - entryIndex >= 192 && close > entry * 0.99 && !tp1Done && !bePartialDone){ exit=close; exitTime=kTime(bar); realized+=remainingQty*(entry-exit); reason='stale_exit'; break; }
       if(i===lastIndex){ exit=close; exitTime=kTime(bar); realized+=remainingQty*(entry-exit); }
     } else {
       mfe = Math.max(mfe, pct(entry, high) || 0);
@@ -1482,7 +1482,7 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
         reason=tp1Done?'trail_stop':highest>=risk.lockTrigger?'lock_stop':highest>=risk.beTrigger?'be_stop':(earlyTrigger&&highest>=earlyTrigger)?'early_stop':'stop'; break;
       }
       if(!tp1Done && high >= risk.tp1){ const sq=remainingQty*0.5; realized+=sq*(risk.tp1-entry); remainingQty-=sq; tp1Done=true; }
-      if(i - entryIndex >= 96 && close < entry * 1.01 && !tp1Done && !bePartialDone){ exit=close; exitTime=kTime(bar); realized+=remainingQty*(exit-entry); reason='stale_exit'; break; }
+      if(i - entryIndex >= 192 && close < entry * 1.01 && !tp1Done && !bePartialDone){ exit=close; exitTime=kTime(bar); realized+=remainingQty*(exit-entry); reason='stale_exit'; break; }
       if(i===lastIndex){ exit=close; exitTime=kTime(bar); realized+=remainingQty*(exit-entry); }
     }
   }
@@ -1763,9 +1763,9 @@ async function updatePositions(){
         if(!p.tp1Done && (p.side==='short' ? low<=p.tp1 : high>=p.tp1)){
           takeTP1(p, kTime(bar));
         }
-        // 呆倉踢除：持有 24h 仍未達 +1% 且未觸發任何保護層 → 出場讓位給新訊號
+        // 呆倉踢除：持有 48h 仍未達 +1% 且未觸發任何保護層 → 出場讓位給新訊號（24h 會誤殺慢熱單，見 ZEC 案例）
         const staleProfit = p.side==='short' ? (p.entry-close)/p.entry : (close-p.entry)/p.entry;
-        if(kTime(bar) >= p.entryTime + 24*60*60*1000 && staleProfit < 0.01 && !p.tp1Done && !p.bePartialDone){
+        if(kTime(bar) >= p.entryTime + 48*60*60*1000 && staleProfit < 0.01 && !p.tp1Done && !p.bePartialDone){
           closePosition(p, close, 'stale_exit', kTime(bar));
           closed = true; break;
         }
