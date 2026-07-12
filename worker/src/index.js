@@ -1623,6 +1623,8 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
     if (key === 'strong_momentum_breakout' && momentum1h >= 4) return null;
     // 放量單專屬窄停損：ATR 門檻已保證標的在動，2% 停損換更高賺賠比
     if (key === 'volume_ignition') { risk.stop = price * 0.98; risk.stopPct = 2; metrics.stopPct = 2; }
+    // 回檔/題材單停損上限 4%：贏單 MAE 不超過 3.5%，更寬的停損只稀釋賺賠比
+    if ((key === 'pullback_uptrend' || key === 'narrative_momentum') && risk.stopPct > 4) { risk.stop = price * 0.96; risk.stopPct = 4; metrics.stopPct = 4; }
     // 回檔單專屬 +4% 早期保護：浮盈 +4% 後停損拉到 -1%
     const earlyTrigger = key === 'pullback_uptrend' ? price * 1.04 : undefined;
     const earlyLevel = key === 'pullback_uptrend' ? price * 0.99 : undefined;
