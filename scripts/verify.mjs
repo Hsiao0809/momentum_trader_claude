@@ -34,8 +34,16 @@ step('OKX and Gate market provider behavior', () => {
   execFileSync(process.execPath, ['scripts/verify-market-providers.mjs']);
 });
 
+step('position history gap recovery behavior', () => {
+  execFileSync(process.execPath, ['scripts/verify-position-history.mjs']);
+});
+
 step('XYZ reserved scan allocation', () => {
   execFileSync(process.execPath, ['scripts/verify-xyz-scan.mjs']);
+});
+
+step('Durable Object runtime, atomic state, and latest-price paper entries', () => {
+  execFileSync(process.execPath, ['scripts/verify-coordinator-runtime.mjs']);
 });
 
 step('closed-trade average exit and partial-exit display', () => {

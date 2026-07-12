@@ -134,8 +134,8 @@ for (const testCase of cases) {
 
 assert.match(
   workerSource,
-  /for \(const sig of state\.signals\)/,
-  'paper entries must continue to use only current-scan signals',
+  /eligibleEntrySignals\(state, signals = state\.signals\)/,
+  'paper entries must continue to use only complete current-scan signals',
 );
 assert.doesNotMatch(
   workerSource,
@@ -148,7 +148,7 @@ assert.match(workerSource, /scanRequestDelayMs: 500/);
 assert.match(workerSource, /universeSource = 'cached'/);
 assert.match(workerSource, /\/api\/v5\/market\/history-candles/);
 assert.match(workerSource, /history-candles'.+0, 0\)/);
-assert.match(htmlSource, /掃描失敗 · \$\{state\.lastError\}/);
+assert.match(htmlSource, /function runnerErrorSummary\(runnerState\)/);
 assert.match(htmlSource, /Universe使用快取/);
 assert.equal(failureReason(new Error('OKX /api/v5/market/history-candles 429')), 'okx_rate_limit');
 assert.equal(failureReason(new Error('Gate /api/v4/futures/usdt/candlesticks 429')), 'gate_rate_limit');

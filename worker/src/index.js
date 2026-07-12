@@ -1,5 +1,9 @@
+import { DurableObject } from 'cloudflare:workers';
+
 const STATE_KEY = 'paper-state-v1';
-const LOCK_KEY = 'paper-lock-v1';
+const STATE_META_KEY = 'paper-state-meta-v1';
+const STATE_CHUNK_PREFIX = 'paper-state-chunk-v1-';
+const STATE_CHUNK_BYTES = 1_500_000;
 const NOTIFICATION_STATUS_KEY = 'notification-status-v1';
 const NOTIFICATION_DLQ = 'momentum-trader-notifications-dlq';
 const OKX_API = 'https://www.okx.com';
@@ -13,7 +17,8 @@ const GATE_MIN_QUOTE_VOLUME = 5_000_000;
 const GATE_FALLBACK_VOLUME_RATIO = 0.25;
 const XYZ_MIN_QUOTE_VOLUME = 5_000_000;
 const POSITION_KLINE_LOOKBACK_MIN = 8;
-const POSITION_KLINE_LOOKBACK_MAX = 48;
+const POSITION_KLINE_LOOKBACK_MAX = 300;
+const COMPLETE_SCAN_BATCH_SIZE = 2;
 
 const LABELS = {
   pullback_uptrend: '上升趨勢回檔',
@@ -50,7 +55,7 @@ const DEFAULT_CFG = {
   symbolStopCooldownMs: 24 * 60 * 60 * 1000,
   scanLimit: 35,
   maxKlineScans: 16,
-  scanBatchSize: 4,
+  scanBatchSize: COMPLETE_SCAN_BATCH_SIZE,
   anomalyScanLimit: 10,
   coreScanLimit: 3,
   coreScanEveryMs: 30 * 60 * 1000,
@@ -78,7 +83,10 @@ export default {
     return handleRequest(request, env, ctx);
   },
   async scheduled(controller, env, ctx) {
-    ctx.waitUntil(runPaperTick(env, { reason: 'cron', scheduledScan: true }));
+    ctx.waitUntil(triggerPaperTick(env, {
+      reason: 'cron',
+      scheduledAt: Number(controller.scheduledTime || Date.now()),
+    }));
   },
   async queue(batch, env) {
     if (batch.queue === NOTIFICATION_DLQ) {
@@ -101,71 +109,28 @@ async function handleRequest(request, env) {
     }
 
     if (request.method === 'GET' && url.pathname === '/state') {
-      return json({ ok: true, state: await loadStateForResponse(env) });
+      return paperCoordinator(env).fetch('https://paper-coordinator/state');
     }
 
     if (request.method === 'GET' && url.pathname === '/prices') {
-      const state = await loadState(env);
-      const prices = await currentPrices(state);
-      return json({ ok: true, fetchedAt: Date.now(), prices });
+      return paperCoordinator(env).fetch('https://paper-coordinator/prices');
     }
 
     if (request.method === 'GET' && url.pathname === '/snapshot') {
-      const state = await loadStateForResponse(env);
-      const prices = await currentPrices(state);
-      return json({ ok: true, fetchedAt: Date.now(), state, prices });
+      return paperCoordinator(env).fetch('https://paper-coordinator/snapshot');
     }
 
-    if (request.method === 'POST' && url.pathname === '/start') {
+    if (request.method === 'POST' && ['/start', '/stop', '/reset', '/config', '/scan', '/tick'].includes(url.pathname)) {
       const body = await readJson(request);
-      const state = await loadState(env);
-      applyConfig(state, body);
-      state.running = true;
-      state.lastError = null;
-      state.updatedBy = 'start';
-      await saveState(env, state);
-      await runPaperTick(env, { forceScan: true, reason: 'manual-start' });
-      return json({ ok: true, state: await loadState(env) });
-    }
-
-    if (request.method === 'POST' && url.pathname === '/stop') {
-      const state = await loadState(env);
-      state.running = false;
-      state.updatedBy = 'stop';
-      await saveState(env, state);
-      return json({ ok: true, state });
-    }
-
-    if (request.method === 'POST' && url.pathname === '/reset') {
-      const body = await readJson(request);
-      const state = defaultState();
-      applyConfig(state, body);
-      state.updatedBy = 'reset';
-      await saveState(env, state);
-      return json({ ok: true, state });
-    }
-
-    if (request.method === 'POST' && url.pathname === '/config') {
-      const body = await readJson(request);
-      const state = await loadState(env);
-      applyConfig(state, body);
-      state.updatedBy = 'config';
-      await saveState(env, state);
-      return json({ ok: true, state });
-    }
-
-    if (request.method === 'POST' && url.pathname === '/scan') {
-      await runPaperTick(env, { forceScan: true, onlyScan: true, reason: 'manual-scan' });
-      return json({ ok: true, state: await loadState(env) });
-    }
-
-    if (request.method === 'POST' && url.pathname === '/tick') {
-      await runPaperTick(env, { forceScan: url.searchParams.get('forceScan') === '1', reason: 'manual-tick' });
-      return json({ ok: true, state: await loadState(env) });
+      if (url.pathname === '/tick') body.forceScan = url.searchParams.get('forceScan') === '1';
+      return paperCoordinator(env).fetch(`https://paper-coordinator/control${url.pathname}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
     }
 
     if (request.method === 'POST' && url.pathname === '/notify/test') {
-      const state = await loadState(env);
       const text = 'Claude Momentum 測試通知\nWorker 通知通道已連線。';
       if (url.searchParams.get('queue') === '1' && env.NOTIFICATION_QUEUE) {
         await env.NOTIFICATION_QUEUE.send({
@@ -178,83 +143,281 @@ async function handleRequest(request, env) {
         });
         return json({ ok: true, notification: { configured: configuredNotificationChannels(env), sent: 0, queued: true } });
       }
-      const notification = await sendNotification(env, text, { type: 'test', state });
+      const notification = await sendNotification(env, text, { type: 'test' });
       return json({ ok: true, notification });
     }
 
     return json({ ok: false, error: 'Not found' }, 404);
   } catch (error) {
-    const state = await loadState(env).catch(() => null);
-    if (state) {
-      state.lastError = `${error.message || error}`;
-      state.lastErrorAt = Date.now();
-      await saveState(env, state).catch(() => {});
-    }
     return json({ ok: false, error: error.message || String(error) }, 500);
   }
 }
 
-async function runPaperTick(env, options = {}) {
-  const now = Date.now();
-  const lock = await env.PAPER_STATE.get(LOCK_KEY, 'json');
-  if (lock?.expiresAt && lock.expiresAt > now) return;
-  await env.PAPER_STATE.put(LOCK_KEY, JSON.stringify({ expiresAt: now + 55000 }), { expirationTtl: 60 });
+export class PaperCoordinator extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.ctx = ctx;
+    this.env = env;
+    this.tickChain = Promise.resolve();
+  }
 
-  try {
-    const state = await loadState(env);
-    state.lastRunAt = now;
-    state.lastRunReason = options.reason || 'unknown';
-    state.marketProvider = 'okx+gate+xyz-perpetuals';
-
-    recoverLastFailedNotification(state);
-    if (await flushPendingNotifications(state, env)) {
-      await saveState(env, state);
+  async storedState() {
+    const meta = await this.ctx.storage.get(STATE_META_KEY);
+    if (meta?.chunkCount > 0) {
+      const keys = Array.from({ length: meta.chunkCount }, (_, index) => `${STATE_CHUNK_PREFIX}${index}`);
+      const stored = await this.ctx.storage.get(keys);
+      const chunks = keys.map((key) => stored.get(key)).filter(Boolean).map((value) => new Uint8Array(value));
+      if (chunks.length !== keys.length) throw new Error('Paper state chunk is missing');
+      const totalLength = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+      if (totalLength !== Number(meta.byteLength || 0)) throw new Error('Paper state chunk length mismatch');
+      const bytes = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return normalizeState(JSON.parse(new TextDecoder().decode(bytes)));
     }
 
-    if (!state.running && !state.positions.length && !options.forceScan && !options.onlyScan) {
-      return;
+    let state = await this.ctx.storage.get(STATE_KEY);
+    if (!state) {
+      const legacy = this.env.PAPER_STATE
+        ? await this.env.PAPER_STATE.get(STATE_KEY, 'json').catch(() => null)
+        : null;
+      state = normalizeState(legacy || defaultState());
+      state.stateVersion = Math.max(1, Number(state.stateVersion || 0));
+      state.migratedFromKvAt = legacy ? Date.now() : 0;
     }
+    await this.persistState(state);
+    return normalizeState(state);
+  }
 
-    const scanStale = !state.signals.length || now - (state.lastScanAt || 0) >= state.cfg.scanStaleMs;
-    const willScan = options.forceScan || hasActiveScanPlan(state) || scanStale;
-    await updatePositions(state, { markToMarket: !willScan });
-
-    if (willScan) {
-      const currentSignals = await scanSignals(state, { forceNewPlan: options.forceScan });
-      const signalSeenAt = state.scanMeta?.scannedAt || Date.now();
-      if (state.scanMeta?.scanComplete) state.lastScanAt = signalSeenAt;
-      state.signals = currentSignals;
-      state.recentSignals = mergeRecentSignals(state.recentSignals, currentSignals, signalSeenAt);
+  async persistState(state) {
+    const bytes = new TextEncoder().encode(JSON.stringify(normalizeState(state)));
+    const chunks = [];
+    for (let offset = 0; offset < bytes.byteLength; offset += STATE_CHUNK_BYTES) {
+      const chunk = bytes.slice(offset, Math.min(offset + STATE_CHUNK_BYTES, bytes.byteLength));
+      chunks.push(chunk.buffer);
     }
+    await this.ctx.storage.transaction(async (txn) => {
+      const previous = await txn.get(STATE_META_KEY);
+      for (let index = 0; index < chunks.length; index++) {
+        await txn.put(`${STATE_CHUNK_PREFIX}${index}`, chunks[index]);
+      }
+      for (let index = chunks.length; index < Number(previous?.chunkCount || 0); index++) {
+        await txn.delete(`${STATE_CHUNK_PREFIX}${index}`);
+      }
+      await txn.put(STATE_META_KEY, {
+        chunkCount: chunks.length,
+        byteLength: bytes.byteLength,
+        stateVersion: Number(state.stateVersion || 0),
+      });
+      if (!previous) await txn.delete(STATE_KEY);
+    });
+  }
 
-    if (state.running && !options.onlyScan) {
-      await openNewPositions(state, env);
+  async saveStoredState(state) {
+    const next = normalizeState(state);
+    next.stateVersion = Number(next.stateVersion || 0) + 1;
+    next.savedAt = Date.now();
+    await this.persistState(next);
+    Object.assign(state, next);
+    return next;
+  }
+
+  enqueue(operation) {
+    const pending = this.tickChain.then(operation, operation);
+    this.tickChain = pending.catch(() => {});
+    return pending;
+  }
+
+  async runTick(options = {}) {
+    const now = Date.now();
+    const state = await this.storedState();
+    try {
+      state.lastRunAt = now;
+      state.lastRunReason = options.reason || 'coordinator';
+      state.marketProvider = 'okx+gate+xyz-perpetuals';
+
+      recoverLastFailedNotification(state);
+      if (await flushPendingNotifications(state, this.env)) await this.saveStoredState(state);
+
+      const forceScan = Boolean(options.forceScan || state.forceScanRequested);
+      const onlyScan = Boolean(options.onlyScan || state.manualScanOnly);
+      const scanStale = !state.signals.length || now - (state.lastScanAt || 0) >= state.cfg.scanStaleMs;
+      const willScan = forceScan || scanStale;
+      if (!state.running && !state.positions.length && !willScan && !onlyScan) {
+        return { skipped: true, reason: 'paper-stopped' };
+      }
+
+      const positionUpdate = applyPositionUpdateStatus(
+        state,
+        await updatePositions(state, { markToMarket: !willScan }),
+      );
+      if (willScan) {
+        let plan = await createScanPlan(state);
+        while (plan.cursor < plan.tickers.length) {
+          plan = await scanSignalPlanBatch(plan, state.cfg, COMPLETE_SCAN_BATCH_SIZE);
+        }
+        finalizeScanPlan(state, plan);
+      }
+
+      await openNewPositionsAfterUpdate(state, this.env, onlyScan, positionUpdate);
+      state.forceScanRequested = false;
+      state.manualScanOnly = false;
+      if (positionUpdate.historyGaps.length) {
+        const symbols = positionUpdate.historyGaps.map((gap) => gap.symbol).join(', ');
+        state.lastError = `position_history_gap: ${symbols}; new entries paused until candle history is continuous`;
+        state.lastErrorAt = Date.now();
+      } else {
+        state.lastError = null;
+      }
+      await this.saveStoredState(state);
+      return {
+        ok: true,
+        stateVersion: state.stateVersion,
+        scannedCount: state.scanMeta?.scannedCount || 0,
+        signalCount: state.signals.length,
+        openPositions: state.positions.length,
+      };
+    } catch (error) {
+      state.lastError = `${error.message || error}`;
+      state.lastErrorAt = Date.now();
+      await this.saveStoredState(state).catch(() => {});
+      throw error;
     }
+  }
 
-    state.lastError = null;
-    await saveState(env, state);
-  } catch (error) {
-    const state = await loadState(env).catch(() => defaultState());
-    state.lastError = `${error.message || error}`;
-    state.lastErrorAt = Date.now();
-    state.lastRunAt = Date.now();
-    await saveState(env, state);
-    throw error;
-  } finally {
-    await env.PAPER_STATE.delete(LOCK_KEY);
+  async runControl(pathname, body = {}) {
+    if (pathname === '/control/start') {
+      const state = await this.storedState();
+      applyConfig(state, body);
+      state.running = true;
+      state.lastError = null;
+      state.updatedBy = 'start';
+      await this.saveStoredState(state);
+      const tick = await this.runTick({ forceScan: true, reason: 'manual-start' });
+      return { ok: true, tick, state: await this.storedState() };
+    }
+    if (pathname === '/control/stop') {
+      const state = await this.storedState();
+      state.running = false;
+      state.updatedBy = 'stop';
+      await this.saveStoredState(state);
+      return { ok: true, state };
+    }
+    if (pathname === '/control/reset') {
+      const current = await this.storedState();
+      const state = defaultState();
+      state.stateVersion = current.stateVersion;
+      applyConfig(state, body);
+      state.updatedBy = 'reset';
+      await this.saveStoredState(state);
+      return { ok: true, state };
+    }
+    if (pathname === '/control/config') {
+      const state = await this.storedState();
+      applyConfig(state, body);
+      state.updatedBy = 'config';
+      await this.saveStoredState(state);
+      return { ok: true, state };
+    }
+    if (pathname === '/control/scan') {
+      const tick = await this.runTick({ forceScan: true, onlyScan: true, reason: 'manual-scan' });
+      return { ok: true, tick, state: await this.storedState() };
+    }
+    if (pathname === '/control/tick') {
+      const tick = await this.runTick({ forceScan: Boolean(body.forceScan), reason: 'manual-tick' });
+      return { ok: true, tick, state: await this.storedState() };
+    }
+    return { ok: false, error: 'Unknown paper control' };
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (request.method === 'GET' && url.pathname === '/raw-state') {
+      return json({ ok: true, state: await this.storedState() });
+    }
+    if (request.method === 'GET' && url.pathname === '/state') {
+      const state = await this.storedState();
+      const status = await this.env.PAPER_STATE.get(NOTIFICATION_STATUS_KEY, 'json');
+      return json({ ok: true, state: mergeNotificationStatus(state, status) });
+    }
+    if (request.method === 'GET' && url.pathname === '/prices') {
+      const state = await this.storedState();
+      return json({ ok: true, fetchedAt: Date.now(), prices: await currentPrices(state) });
+    }
+    if (request.method === 'GET' && url.pathname === '/snapshot') {
+      const state = await this.storedState();
+      const [prices, status] = await Promise.all([
+        currentPrices(state),
+        this.env.PAPER_STATE.get(NOTIFICATION_STATUS_KEY, 'json'),
+      ]);
+      return json({
+        ok: true,
+        fetchedAt: Date.now(),
+        state: mergeNotificationStatus(state, status),
+        prices,
+      });
+    }
+    if (request.method === 'POST' && url.pathname.startsWith('/control/')) {
+      const body = await request.json().catch(() => ({}));
+      try {
+        const result = await this.enqueue(() => this.runControl(url.pathname, body));
+        return json(result, result.ok === false ? 404 : 200);
+      } catch (error) {
+        return json({ ok: false, error: error.message || String(error) }, 500);
+      }
+    }
+    if (request.method === 'POST' && url.pathname === '/commit') {
+      const body = await request.json();
+      return this.enqueue(async () => {
+        const current = await this.storedState();
+        const expectedVersion = Number(body.expectedVersion || 0);
+        if (expectedVersion !== Number(current.stateVersion || 0)) {
+          return json({
+            ok: false,
+            error: 'state_version_conflict',
+            stateVersion: current.stateVersion,
+          }, 409);
+        }
+        const next = normalizeState(body.state || defaultState());
+        next.stateVersion = expectedVersion;
+        await this.saveStoredState(next);
+        return json({ ok: true, state: next });
+      });
+    }
+    if (request.method === 'POST' && url.pathname === '/tick') {
+      const options = await request.json().catch(() => ({}));
+      try {
+        return json(await this.enqueue(() => this.runTick(options)));
+      } catch (error) {
+        return json({ ok: false, error: error.message || String(error) }, 500);
+      }
+    }
+    return json({ ok: false, error: 'Not found' }, 404);
   }
 }
 
-async function loadState(env) {
-  const raw = await env.PAPER_STATE.get(STATE_KEY, 'json');
-  return normalizeState(raw || defaultState());
+function paperCoordinator(env) {
+  if (!env.PAPER_COORDINATOR) return null;
+  return env.PAPER_COORDINATOR.getByName(STATE_KEY);
 }
 
-async function loadStateForResponse(env) {
-  const [state, status] = await Promise.all([
-    loadState(env),
-    env.PAPER_STATE.get(NOTIFICATION_STATUS_KEY, 'json'),
-  ]);
+async function triggerPaperTick(env, options = {}) {
+  const coordinator = paperCoordinator(env);
+  if (!coordinator) throw new Error('PAPER_COORDINATOR binding is unavailable');
+  const response = await coordinator.fetch('https://paper-coordinator/tick', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(options),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload.ok === false) throw new Error(payload.error || `PaperCoordinator tick ${response.status}`);
+  return payload;
+}
+
+function mergeNotificationStatus(state, status) {
   const current = state.lastNotification;
   if (status && (
     status.positionId === current?.positionId ||
@@ -269,14 +432,12 @@ async function loadStateForResponse(env) {
   return state;
 }
 
-async function saveState(env, state) {
-  state.savedAt = Date.now();
-  await env.PAPER_STATE.put(STATE_KEY, JSON.stringify(normalizeState(state)));
-}
-
 function defaultState() {
   return {
     running: false,
+    stateVersion: 0,
+    forceScanRequested: false,
+    manualScanOnly: false,
     initialEquity: DEFAULT_CFG.initialEquity,
     equity: DEFAULT_CFG.initialEquity,
     peakEquity: DEFAULT_CFG.initialEquity,
@@ -299,6 +460,7 @@ function defaultState() {
     tickerSnapshot: null,
     lastRunAt: 0,
     lastError: null,
+    positionHistoryGaps: [],
     marketProvider: 'okx+gate+xyz-perpetuals',
     cfg: { ...DEFAULT_CFG },
   };
@@ -326,6 +488,9 @@ function normalizeState(state) {
     ...defaultState(),
     ...state,
     cfg,
+    stateVersion: Math.max(0, Number(state.stateVersion || 0)),
+    forceScanRequested: Boolean(state.forceScanRequested),
+    manualScanOnly: Boolean(state.manualScanOnly),
     initialEquity: Number(state.initialEquity ?? cfg.initialEquity),
     equity: Number(state.equity ?? cfg.initialEquity),
     peakEquity: Number(state.peakEquity ?? state.equity ?? cfg.initialEquity),
@@ -336,6 +501,7 @@ function normalizeState(state) {
     equityCurve: Array.isArray(state.equityCurve) ? state.equityCurve : [],
     notificationLog: Array.isArray(state.notificationLog) ? state.notificationLog.slice(0, 100) : [],
     pendingNotifications: Array.isArray(state.pendingNotifications) ? state.pendingNotifications.slice(0, 20) : [],
+    positionHistoryGaps: Array.isArray(state.positionHistoryGaps) ? state.positionHistoryGaps : [],
     scanPlan: normalizeScanPlan(state.scanPlan),
   };
   normalizeStrategyLabels(normalized.signals);
@@ -442,9 +608,9 @@ function applyConfig(state, body = {}) {
   }
 }
 
-async function createScanPlan(state) {
+async function createScanPlan(state, rankedResult = null) {
   const cfg = state.cfg;
-  const { tickers, meta } = await scanUniverse(state);
+  const { tickers, meta } = await scanUniverse(state, rankedResult);
   let riskOff = false;
   let btcContextOk = true;
   try {
@@ -476,14 +642,28 @@ async function scanSignals(state, options = {}) {
     state.scanPlan = await createScanPlan(state);
   }
 
-  const plan = state.scanPlan;
-  const batchSize = Math.min(positiveInt(cfg.scanBatchSize, DEFAULT_CFG.scanBatchSize), plan.tickers.length || DEFAULT_CFG.scanBatchSize);
-  const batch = plan.tickers.slice(plan.cursor, plan.cursor + batchSize);
+  const batchSize = Math.min(
+    positiveInt(cfg.scanBatchSize, DEFAULT_CFG.scanBatchSize),
+    state.scanPlan.tickers.length || DEFAULT_CFG.scanBatchSize,
+  );
+  state.scanPlan = await scanSignalPlanBatch(state.scanPlan, cfg, batchSize, false);
+  if (state.scanPlan.cursor >= state.scanPlan.tickers.length) {
+    return finalizeScanPlan(state, state.scanPlan);
+  }
+  return state.signals;
+}
 
+async function scanSignalPlanBatch(plan, cfg, batchSize, failOnError = true) {
+  const next = {
+    ...plan,
+    signals: [...(plan.signals || [])],
+    failedSymbols: [...(plan.failedSymbols || [])],
+    failedReasonCounts: { ...(plan.failedReasonCounts || {}) },
+  };
+  const batch = plan.tickers.slice(plan.cursor, plan.cursor + batchSize);
   for (const ticker of batch) {
     try {
       const rows = await marketKlines(ticker.marketProvider, ticker.instId, '15m', 130);
-      plan.successfulScanCount++;
       const sig = evaluateSignal(
         ticker.symbol,
         ticker.instId,
@@ -493,25 +673,48 @@ async function scanSignals(state, options = {}) {
         ticker.marketProvider === 'xyz' ? false : plan.riskOff,
         { ...cfg, minQuoteVolume: ticker.minQuoteVolume || cfg.minQuoteVolume },
       );
-      if (sig) plan.signals.push({
+      next.successfulScanCount++;
+      if (sig) next.signals.push({
         ...sig,
         marketProvider: ticker.marketProvider,
         universeTier: ticker.universeTier,
         universeRank: ticker.rank,
       });
     } catch (error) {
-      plan.failedScanCount++;
-      if (plan.failedSymbols.length < 8) plan.failedSymbols.push(ticker.symbol);
+      if (failOnError) throw error;
+      next.failedScanCount++;
+      if (next.failedSymbols.length < 8) next.failedSymbols.push(ticker.symbol);
       const reason = scanFailureReason(error);
-      plan.failedReasonCounts[reason] = Number(plan.failedReasonCounts[reason] || 0) + 1;
+      next.failedReasonCounts[reason] = Number(next.failedReasonCounts[reason] || 0) + 1;
       console.warn('scan failed', ticker.instId, error);
     }
     await sleep(positiveInt(cfg.scanRequestDelayMs, DEFAULT_CFG.scanRequestDelayMs));
   }
+  next.cursor += batch.length;
+  return next;
+}
 
-  plan.cursor += batch.length;
-  const complete = plan.cursor >= plan.tickers.length;
-  const signals = [...plan.signals].sort((a, b) => b.score - a.score || b.quoteVolume - a.quoteVolume);
+function signalSort(a, b) {
+  return Number(b.score || 0) - Number(a.score || 0)
+    || Number(b.quoteVolume || 0) - Number(a.quoteVolume || 0);
+}
+
+function sortedPlanSignals(plan) {
+  return [...(plan?.signals || [])].sort(signalSort);
+}
+
+function finalizeScanPlan(state, plan) {
+  const requiredCount = positiveInt(state.cfg.maxKlineScans, DEFAULT_CFG.maxKlineScans);
+  if (plan.tickers.length !== requiredCount) {
+    throw new Error(`Incomplete scan universe: ${plan.tickers.length}/${requiredCount}`);
+  }
+  if (plan.cursor < plan.tickers.length || plan.successfulScanCount < plan.tickers.length) {
+    throw new Error(`Incomplete scan plan: ${plan.successfulScanCount}/${plan.tickers.length}`);
+  }
+  if (Date.now() - Number(plan.createdAt || 0) > state.cfg.scanStaleMs) {
+    throw new Error('Scan plan expired before publication');
+  }
+  const signals = sortedPlanSignals(plan);
   const scannedTickers = plan.tickers.slice(0, plan.cursor);
   state.scanMeta = {
     ...plan.meta,
@@ -524,25 +727,29 @@ async function scanSignals(state, options = {}) {
     scannedAt: Date.now(),
     scannedCount: plan.cursor,
     plannedScanCount: plan.tickers.length,
-    batchScannedCount: batch.length,
+    batchScannedCount: plan.tickers.length,
     successfulScanCount: plan.successfulScanCount,
     failedScanCount: plan.failedScanCount,
     failedSymbols: plan.failedSymbols,
     failedReasonCounts: plan.failedReasonCounts,
     btcContextOk: plan.btcContextOk,
-    scanComplete: complete,
-    scanBatchSize: batchSize,
+    scanComplete: true,
+    scanBatchSize: COMPLETE_SCAN_BATCH_SIZE,
     signalCount: signals.length,
   };
-
-  if (complete) {
-    state.scanCursor = plan.meta.nextCursor;
-    state.scanPlan = null;
-  }
+  state.lastScanAt = state.scanMeta.scannedAt;
+  state.signals = signals;
+  state.recentSignals = mergeRecentSignals(state.recentSignals, signals, state.lastScanAt);
+  state.scanCursor = plan.meta.nextCursor;
+  state.scanPlan = null;
   return signals;
 }
 
-async function openNewPositions(state, env) {
+function signalPriceKey(signal) {
+  return `${signal.marketProvider || providerFromInstId(signal.instId)}:${signal.instId}`;
+}
+
+function eligibleEntrySignals(state, signals = state.signals) {
   const cfg = state.cfg;
   if (state.pausedUntil && Date.now() < state.pausedUntil) return;
 
@@ -550,13 +757,63 @@ async function openNewPositions(state, env) {
   const stoppedRecent = new Set((state.trades || [])
     .filter((t) => ['stop', 'be_stop', 'early_stop'].includes(t.reason) && Date.now() - t.exitTime < cfg.symbolStopCooldownMs)
     .map((t) => t.symbol));
+  return [...(signals || [])]
+    .sort(signalSort)
+    .filter((sig) => !openSymbols.has(sig.symbol)
+      && !stoppedRecent.has(sig.symbol)
+      && sig.score >= cfg.paperMinScore
+      && !(sig.strategyKey === 'narrative_momentum' && sig.score < cfg.paperMinScore + 8));
+}
+
+async function latestEntryPrices(state, signals = state.signals) {
+  const candidates = eligibleEntrySignals(state, signals) || [];
+  const results = await Promise.allSettled(candidates.map(async (signal) => [
+    signalPriceKey(signal),
+    await tickerPrice(signal.marketProvider || providerFromInstId(signal.instId), signal.instId),
+  ]));
+  return Object.fromEntries(results
+    .filter((result) => result.status === 'fulfilled')
+    .map((result) => result.value)
+    .filter(([, price]) => Number.isFinite(price) && price > 0));
+}
+
+function repriceSignal(signal, latestPrice) {
+  const signalEntry = Number(signal.entry || 0);
+  const entry = Number(latestPrice || 0);
+  if (!Number.isFinite(signalEntry) || signalEntry <= 0 || !Number.isFinite(entry) || entry <= 0) return null;
+  const rebase = (value) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? entry * (number / signalEntry) : undefined;
+  };
+  return {
+    ...signal,
+    signalEntry,
+    entry,
+    lastPrice: entry,
+    stop: rebase(signal.stop),
+    tp1: rebase(signal.tp1),
+    beTrigger: rebase(signal.beTrigger),
+    lockTrigger: rebase(signal.lockTrigger),
+    lockLevel: rebase(signal.lockLevel),
+    earlyTrigger: rebase(signal.earlyTrigger),
+    earlyLevel: rebase(signal.earlyLevel),
+    pricedAt: Date.now(),
+  };
+}
+
+async function openNewPositions(state, env, latestPrices = null) {
+  const cfg = state.cfg;
+  if (state.pausedUntil && Date.now() < state.pausedUntil) return;
+  const candidates = eligibleEntrySignals(state) || [];
+  const prices = latestPrices || await latestEntryPrices(state, candidates);
+  const openSymbols = new Set(state.positions.map((p) => p.symbol));
 
   let totalRisk = state.positions.reduce((sum, p) => sum + Number(p.riskUsdt || 0), 0);
-  for (const sig of state.signals) {
+  for (const originalSignal of candidates) {
     if (state.positions.length >= cfg.maxPositions) break;
-    if (openSymbols.has(sig.symbol) || stoppedRecent.has(sig.symbol) || sig.score < cfg.paperMinScore) continue;
-    // 題材動量是剩餘分類，訊號品質最模糊，開倉門檻加嚴
-    if (sig.strategyKey === 'narrative_momentum' && sig.score < cfg.paperMinScore + 8) continue;
+    if (openSymbols.has(originalSignal.symbol)) continue;
+    const sig = repriceSignal(originalSignal, prices[signalPriceKey(originalSignal)]);
+    if (!sig) continue;
 
     const sized = positionSize(state.equity, sig.entry, sig.stop, cfg);
     if (totalRisk + sized.riskUsdt > state.equity * cfg.maxTotalRisk) break;
@@ -572,6 +829,8 @@ async function openNewPositions(state, env) {
       side: sig.side || 'long',
       entryTime,
       lastTime: entryTime,
+      signalEntry: sig.signalEntry,
+      pricedAt: sig.pricedAt,
       entry: sig.entry,
       last: sig.entry,
       qty: sized.qty,
@@ -613,18 +872,37 @@ async function openNewPositions(state, env) {
 }
 
 async function updatePositions(state, options = {}) {
-  if (!state.positions.length) return;
-  const markToMarket = options.markToMarket !== false;
-  const stillOpen = [];
+  return updatePositionIds(state, state.positions.map((position) => position.id), options);
+}
 
-  for (const p of state.positions) {
+function applyPositionUpdateStatus(state, positionUpdate) {
+  state.positionHistoryGaps = positionUpdate.historyGaps;
+  return positionUpdate;
+}
+
+async function openNewPositionsAfterUpdate(state, env, onlyScan, positionUpdate) {
+  if (!state.running || onlyScan || positionUpdate.historyGaps.length) return false;
+  const latestPrices = await latestEntryPrices(state, state.signals);
+  await openNewPositions(state, env, latestPrices);
+  return true;
+}
+
+async function updatePositionIds(state, positionIds, options = {}) {
+  if (!state.positions.length || !positionIds.length) return { historyGaps: [] };
+  const markToMarket = options.markToMarket !== false;
+  const selectedIds = new Set(positionIds);
+  const closedIds = new Set();
+  const historyGaps = [];
+
+  for (const p of state.positions.filter((position) => selectedIds.has(position.id))) {
     let closed = false;
     try {
       const provider = p.marketProvider || providerFromInstId(p.instId);
       const instId = p.instId || instIdFromSymbol(p.symbol, provider);
       const rows = closedKlines(await marketKlines(provider, instId, '15m', positionKlineLimit(p)));
-      for (const bar of rows) {
-        if (kTime(bar) <= p.lastTime) continue;
+      const pendingRows = positionKlinesAfter(p, rows);
+      delete p.historyGap;
+      for (const bar of pendingRows) {
         p.lastTime = kTime(bar);
         const high = kHigh(bar);
         const low = kLow(bar);
@@ -674,16 +952,29 @@ async function updatePositions(state, options = {}) {
         }
       }
     } catch (error) {
+      if (error.code === 'position_history_gap') {
+        const gap = {
+          ...error.details,
+          symbol: p.symbol,
+          provider: p.marketProvider || providerFromInstId(p.instId),
+          detectedAt: Date.now(),
+        };
+        p.historyGap = gap;
+        historyGaps.push(gap);
+      } else if (p.historyGap) {
+        historyGaps.push(p.historyGap);
+      }
       console.warn('position update failed', p.symbol, error);
     }
 
-    if (!closed) stillOpen.push(p);
+    if (closed) closedIds.add(p.id);
     await sleep(20);
   }
-  state.positions = stillOpen;
+  if (closedIds.size) state.positions = state.positions.filter((position) => !closedIds.has(position.id));
+  return { historyGaps };
 }
 
-async function scanUniverse(state) {
+async function scanUniverse(state, rankedResult = null) {
   const cfg = state.cfg;
   const maxKlineScans = positiveInt(cfg.maxKlineScans || cfg.scanLimit, 35);
   const anomalyLimit = positiveInt(cfg.anomalyScanLimit, 24);
@@ -702,7 +993,7 @@ async function scanUniverse(state) {
   let providerMeta = {};
   let ranked;
   try {
-    const result = await rankedInstruments(cfg);
+    const result = rankedResult || await rankedInstruments(cfg);
     ranked = result.ranked;
     providerMeta = result.providerMeta;
     if (providerMeta.okxError || providerMeta.gateError || providerMeta.xyzError) universeSource = 'live-partial';
@@ -811,9 +1102,9 @@ async function scanUniverse(state) {
 
 async function rankedInstruments(cfg) {
   const [okxResult, gateResult, xyzResult] = await Promise.allSettled([
-    okx('/api/v5/market/tickers', { instType: 'SWAP' }),
-    gate('/api/v4/futures/usdt/tickers'),
-    hyperliquidInfo({ type: 'metaAndAssetCtxs', dex: 'xyz' }),
+    okx('/api/v5/market/tickers', { instType: 'SWAP' }, 0, 1),
+    gate('/api/v4/futures/usdt/tickers', {}, 0, 1),
+    hyperliquidInfo({ type: 'metaAndAssetCtxs', dex: 'xyz' }, 0, 1),
   ]);
   if (okxResult.status === 'rejected' && gateResult.status === 'rejected' && xyzResult.status === 'rejected') {
     throw new Error(`Market universe unavailable: ${okxResult.reason}; ${gateResult.reason}; ${xyzResult.reason}`);
@@ -991,14 +1282,14 @@ function mergeProviderInstruments(okxEligible, gateEligible, okxAll = okxEligibl
 async function tickerPrice(provider, instId) {
   let price;
   if (provider === 'gate') {
-    const data = await gate('/api/v4/futures/usdt/tickers', { contract: instId });
+    const data = await gate('/api/v4/futures/usdt/tickers', { contract: instId }, 0, 0);
     price = Number(data?.[0]?.last || 0);
   } else if (provider === 'xyz') {
-    const ticker = normalizeXyzTickers(await hyperliquidInfo({ type: 'metaAndAssetCtxs', dex: 'xyz' }))
+    const ticker = normalizeXyzTickers(await hyperliquidInfo({ type: 'metaAndAssetCtxs', dex: 'xyz' }, 0, 0))
       .find((item) => item.instId === instId);
     price = Number(ticker?.last || 0);
   } else {
-    const data = await okx('/api/v5/market/ticker', { instId });
+    const data = await okx('/api/v5/market/ticker', { instId }, 0, 0);
     price = Number(data?.[0]?.last || 0);
   }
   if (!Number.isFinite(price) || price <= 0) throw new Error(`${provider} ticker price unavailable: ${instId}`);
@@ -1462,9 +1753,7 @@ function closePosition(state, p, exit, reason, exitTime) {
     reason,
   });
   state.trades.unshift({ symbol: p.symbol, instId: p.instId, marketProvider: p.marketProvider || providerFromInstId(p.instId), strategyKey: p.strategyKey, strategyLabel: p.strategyLabel, side: p.side || 'long', entryTime: p.entryTime, exitTime, entry: p.entry, exit, qty: p.qty, pnl: totalPnl, rMultiple: safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct, maePct, score: p.score, partialExits: p.partialExits || [], events: p.events || [] });
-  state.trades = state.trades.slice(0, 500);
   state.equityCurve.push({ timeMs: exitTime, equity: state.equity, drawdownPct: safeDiv(state.peakEquity - state.equity, state.peakEquity, 0) * 100 });
-  state.equityCurve = state.equityCurve.slice(-1000);
   state.consecutiveLosses = totalPnl < 0 ? state.consecutiveLosses + 1 : 0;
   if (state.consecutiveLosses >= 3) {
     state.pausedUntil = Date.now() + 6 * 60 * 60 * 1000;
@@ -1900,6 +2189,35 @@ function positionKlineLimit(position) {
   if (!lastTime) return POSITION_KLINE_LOOKBACK_MAX;
   const missingBars = Math.ceil(Math.max(0, Date.now() - lastTime) / INTERVAL_MS['15m']);
   return clamp(missingBars + 4, POSITION_KLINE_LOOKBACK_MIN, POSITION_KLINE_LOOKBACK_MAX);
+}
+
+function positionKlinesAfter(position, rows, now = Date.now()) {
+  const lastTime = Number(position?.lastTime || position?.entryTime || 0);
+  const pendingRows = rows.filter((row, index) => (
+    kTime(row) > lastTime && (!index || kTime(row) !== kTime(rows[index - 1]))
+  ));
+  if (!lastTime) return pendingRows;
+
+  const intervalMs = INTERVAL_MS['15m'];
+  const expectedTime = Math.floor(lastTime / intervalMs) * intervalMs + intervalMs;
+  const latestClosedTime = Math.floor(now / intervalMs) * intervalMs - intervalMs;
+  const firstMismatch = pendingRows.find((row, index) => kTime(row) !== expectedTime + index * intervalMs);
+  const trailingGap = pendingRows.length && kTime(pendingRows[pendingRows.length - 1]) < latestClosedTime;
+  if (expectedTime <= latestClosedTime && (!pendingRows.length || firstMismatch || trailingGap)) {
+    const firstAvailableTime = firstMismatch ? kTime(firstMismatch) : null;
+    const mismatchIndex = firstMismatch ? pendingRows.indexOf(firstMismatch) : pendingRows.length;
+    const missingStartTime = expectedTime + mismatchIndex * intervalMs;
+    const missingEndTime = firstAvailableTime ? firstAvailableTime - intervalMs : latestClosedTime;
+    const missingBars = Math.floor((missingEndTime - missingStartTime) / intervalMs) + 1;
+    const error = new Error(
+      `position_history_gap: expected ${new Date(missingStartTime).toISOString()}, `
+      + `first available ${firstAvailableTime ? new Date(firstAvailableTime).toISOString() : 'none'}`,
+    );
+    error.code = 'position_history_gap';
+    error.details = { lastTime, expectedTime: missingStartTime, firstAvailableTime, missingBars };
+    throw error;
+  }
+  return pendingRows;
 }
 
 function atrPct(rows, period = 14) {

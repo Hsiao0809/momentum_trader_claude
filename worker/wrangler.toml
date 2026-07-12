@@ -6,6 +6,14 @@ workers_dev = true
 [triggers]
 crons = ["*/5 * * * *"]
 
+[[durable_objects.bindings]]
+name = "PAPER_COORDINATOR"
+class_name = "PaperCoordinator"
+
+[[migrations]]
+tag = "v1-paper-coordinator"
+new_sqlite_classes = ["PaperCoordinator"]
+
 [[kv_namespaces]]
 binding = "PAPER_STATE"
 id = "320b0704920745398c1c73d072beb5c3"
