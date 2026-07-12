@@ -38,6 +38,10 @@ step('XYZ reserved scan allocation', () => {
   execFileSync(process.execPath, ['scripts/verify-xyz-scan.mjs']);
 });
 
+step('Durable Object runtime, atomic state, and latest-price paper entries', () => {
+  execFileSync(process.execPath, ['scripts/verify-coordinator-runtime.mjs']);
+});
+
 step('closed-trade average exit and partial-exit display', () => {
   execFileSync(process.execPath, ['scripts/verify-trade-exits.mjs']);
 });

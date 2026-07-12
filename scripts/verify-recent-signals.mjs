@@ -134,8 +134,8 @@ for (const testCase of cases) {
 
 assert.match(
   workerSource,
-  /for \(const sig of state\.signals\)/,
-  'paper entries must continue to use only current-scan signals',
+  /eligibleEntrySignals\(state, signals = state\.signals\)/,
+  'paper entries must continue to use only complete current-scan signals',
 );
 assert.doesNotMatch(
   workerSource,

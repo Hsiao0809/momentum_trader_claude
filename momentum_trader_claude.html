@@ -1396,6 +1396,28 @@ function positionSize(equity, entry, stop){
   const perUnitRisk = Math.max(Math.abs(entry - stop), entry * 0.001);
   return { qty: riskUsdt / perUnitRisk, riskUsdt };
 }
+function repriceSignal(signal, latestPrice){
+  const signalEntry = Number(signal.entry || 0), entry = Number(latestPrice || 0);
+  if(!Number.isFinite(signalEntry) || signalEntry <= 0 || !Number.isFinite(entry) || entry <= 0) return null;
+  const rebase = value => {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? entry * (number / signalEntry) : undefined;
+  };
+  return {
+    ...signal,
+    signalEntry,
+    entry,
+    lastPrice:entry,
+    stop:rebase(signal.stop),
+    tp1:rebase(signal.tp1),
+    beTrigger:rebase(signal.beTrigger),
+    lockTrigger:rebase(signal.lockTrigger),
+    lockLevel:rebase(signal.lockLevel),
+    earlyTrigger:rebase(signal.earlyTrigger),
+    earlyLevel:rebase(signal.earlyLevel),
+    pricedAt:nowMs(),
+  };
+}
 function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
   if(entryIndex >= rows.length) return null;
   const entryBar = rows[entryIndex];
@@ -1584,16 +1606,29 @@ async function paperTick(){
   const stoppedRecent = new Set((state.trades || [])
     .filter(t => ['stop','be_stop','early_stop'].includes(t.reason) && nowMs() - t.exitTime < CFG.symbolStopCooldownMs)
     .map(t => t.symbol));
+  const candidates = [...state.signals]
+    .sort((a,b) => b.score - a.score || b.quoteVolume - a.quoteVolume)
+    .filter(sig => !openSymbols.has(sig.symbol)
+      && !stoppedRecent.has(sig.symbol)
+      && sig.score >= CFG.paperMinScore
+      && !(sig.strategyKey === 'narrative_momentum' && sig.score < CFG.paperMinScore + 8));
+  const latestResults = await Promise.allSettled(candidates.map(async sig => [
+    sig.symbol,
+    Number((await request('/fapi/v1/ticker/price', { symbol:sig.symbol })).price),
+  ]));
+  const latestBySymbol = Object.fromEntries(latestResults
+    .filter(result => result.status === 'fulfilled' && Number.isFinite(result.value[1]) && result.value[1] > 0)
+    .map(result => result.value));
   let totalRisk = state.positions.reduce((a,p)=>a+p.riskUsdt,0);
-  for(const sig of state.signals){
+  for(const originalSignal of candidates){
     if(state.positions.length >= CFG.maxPositions) break;
-    if(openSymbols.has(sig.symbol) || stoppedRecent.has(sig.symbol) || sig.score < CFG.paperMinScore) continue;
-    // 題材動量是剩餘分類，訊號品質最模糊，開倉門檻加嚴
-    if(sig.strategyKey === 'narrative_momentum' && sig.score < CFG.paperMinScore + 8) continue;
+    if(openSymbols.has(originalSignal.symbol)) continue;
+    const sig = repriceSignal(originalSignal, latestBySymbol[originalSignal.symbol]);
+    if(!sig) continue;
     const sized = positionSize(state.equity, sig.entry, sig.stop);
     if(totalRisk + sized.riskUsdt > state.equity * CFG.maxTotalRisk) break;
     const entryTime = nowMs();
-    const position = { id:`p_${entryTime}_${sig.symbol}`, symbol:sig.symbol, strategyKey:sig.strategyKey, strategyLabel:sig.strategyLabel, side:sig.side||'long', entryTime, lastTime:entryTime, entry:sig.entry, last:sig.entry, qty:sized.qty, remainingQty:sized.qty, stop:sig.stop, originalStop:sig.stop, tp1:sig.tp1, beTrigger:sig.beTrigger, lockTrigger:sig.lockTrigger, lockLevel:sig.lockLevel, earlyTrigger:sig.earlyTrigger, earlyLevel:sig.earlyLevel, bePartialEnabled:true, bePartialDone:false, tp1Done:false, trailPct:sig.trailPct, highest:sig.entry, lowest:sig.entry, score:sig.score, riskUsdt:sized.riskUsdt, realizedPnl:0, partialExits:[], events:[], reasons:sig.reasons };
+    const position = { id:`p_${entryTime}_${sig.symbol}`, symbol:sig.symbol, strategyKey:sig.strategyKey, strategyLabel:sig.strategyLabel, side:sig.side||'long', entryTime, lastTime:entryTime, signalEntry:sig.signalEntry, pricedAt:sig.pricedAt, entry:sig.entry, last:sig.entry, qty:sized.qty, remainingQty:sized.qty, stop:sig.stop, originalStop:sig.stop, tp1:sig.tp1, beTrigger:sig.beTrigger, lockTrigger:sig.lockTrigger, lockLevel:sig.lockLevel, earlyTrigger:sig.earlyTrigger, earlyLevel:sig.earlyLevel, bePartialEnabled:true, bePartialDone:false, tp1Done:false, trailPct:sig.trailPct, highest:sig.entry, lowest:sig.entry, score:sig.score, riskUsdt:sized.riskUsdt, realizedPnl:0, partialExits:[], events:[], reasons:sig.reasons };
     recordPositionEvent(position, { type:'open', time:entryTime, price:position.entry, qtyDelta:position.qty, remainingQty:position.qty, stop:position.stop });
     state.positions.push(position);
     totalRisk += sized.riskUsdt; openSymbols.add(sig.symbol);
