@@ -484,7 +484,7 @@ function twFull(ms){
   return new Date(ms).toLocaleString('zh-TW', { timeZone:TZ, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
 }
 function tvHref(sym, provider=''){
-  if(provider === 'xyz') return `https://www.tradingview.com/chart/?symbol=HYPERLIQUID:${encodeURIComponent(String(sym).replace(/^xyz:/i, ''))}`;
+  if(provider === 'xyz') return `https://app.hyperliquid.xyz/trade/xyz:${encodeURIComponent(String(sym).replace(/^xyz:/i, ''))}`;
   const exchange = provider === 'gate' ? 'GATEIO' : (provider === 'okx' || SERVER_MODE ? 'OKX' : 'BINANCE');
   return `https://www.tradingview.com/chart/?symbol=${exchange}:${encodeURIComponent(sym)}.P`;
 }
@@ -1848,7 +1848,8 @@ function strategyName(item){ return LABELS[item?.strategyKey] || item?.strategyL
 function symLink(sym, provider=''){
   const source = provider === 'gate' ? 'Gate' : provider === 'xyz' ? 'XYZ' : provider === 'okx' ? 'OKX' : '';
   const tag = source ? `<span class="market-tag">${source}</span>` : '';
-  return `<a class="sym-link" href="${tvHref(sym, provider)}" target="_blank" rel="noopener noreferrer" title="Open ${htmlEscape(sym)} on TradingView"><strong>${htmlEscape(sym)}</strong></a>${tag}`;
+  const dest = provider === 'xyz' ? 'Hyperliquid' : 'TradingView';
+  return `<a class="sym-link" href="${tvHref(sym, provider)}" target="_blank" rel="noopener noreferrer" title="Open ${htmlEscape(sym)} on ${dest}"><strong>${htmlEscape(sym)}</strong></a>${tag}`;
 }
 function tradeExitSummary(trade){
   const totalQty = Math.max(0, Number(trade?.qty) || 0);
