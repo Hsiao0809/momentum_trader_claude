@@ -281,7 +281,7 @@
       <div class="table-wrap">
         <table>
           <thead><tr>
-            <th class="sym">Symbol</th><th class="left">Strategy</th><th>多空</th><th>Entry</th><th>Last</th><th>Δ%</th><th>Unreal U</th><th>Stop</th><th>TP1</th><th>Qty</th><th>Remain</th><th>Risk U</th><th>Score</th><th>Opened</th><th class="left">Reason</th>
+            <th class="sym">Symbol</th><th class="left">Strategy</th><th>多空</th><th>Unreal U</th><th>Entry</th><th>Last</th><th>Δ%</th><th>Stop</th><th>TP1</th><th>Qty</th><th>Remain</th><th>Risk U</th><th>Score</th><th>Opened</th><th class="left">Reason</th>
           </tr></thead>
           <tbody id="positionsBody"></tbody>
         </table>
@@ -306,7 +306,7 @@
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th class="sym">Symbol</th><th>Time</th><th class="left">Event</th><th>Qty Δ</th><th>Price</th><th>Remain</th><th>Stop</th><th>PnL U</th><th class="left">Note</th>
+          <th class="sym">Symbol</th><th>Time</th><th>PnL U</th><th class="left">Event</th><th>Qty Δ</th><th>Price</th><th>Remain</th><th>Stop</th><th class="left">Note</th>
         </tr></thead>
         <tbody id="activityBody"></tbody>
       </table>
@@ -339,7 +339,7 @@
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th class="sym">Symbol</th><th class="left">Strategy</th><th>多空</th><th>Entry</th><th>Avg Exit</th><th>R</th><th>PnL U</th><th>MFE%</th><th>MAE%</th><th>Score</th><th>時數</th><th>Entry time</th><th>Exit time</th><th class="left">Reason</th>
+          <th class="sym">Symbol</th><th class="left">Strategy</th><th>多空</th><th>PnL U</th><th>Entry</th><th>Avg Exit</th><th>R</th><th>MFE%</th><th>MAE%</th><th>Score</th><th>時數</th><th>Entry time</th><th>Exit time</th><th class="left">Reason</th>
         </tr></thead>
         <tbody id="tradesBody"></tbody>
       </table>
@@ -2441,7 +2441,7 @@ function paintAll(){
       ? `<span class="pos">✓ ${fmt(p.tp1,8)}</span>`
       : `<span class="muted">${fmt(p.tp1,8)}</span>`;
     const sideCell = (p.side||'long')==='long' ? `<span class="pos" style="font-weight:600">多</span>` : `<span class="neg" style="font-weight:600">空</span>`;
-    return `<tr><td class="sym">${symLink(p.symbol, p.marketProvider)}</td><td class="left">${htmlEscape(strategyName(p))}</td><td>${sideCell}</td><td>${fmt(p.entry,8)}</td><td>${lastCell}</td><td>${pctCell}</td><td>${pnlCell}</td><td>${stopCell}</td><td>${tp1Cell}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.remainingQty,4)}</td><td>${fmt(p.riskUsdt,2)}</td><td>${fmt(p.score,0)}</td><td>${tw(p.entryTime)}</td><td class="reason">${htmlEscape((p.reasons||[]).slice(0,3).join(' · '))}</td></tr>`;
+    return `<tr><td class="sym">${symLink(p.symbol, p.marketProvider)}</td><td class="left">${htmlEscape(strategyName(p))}</td><td>${sideCell}</td><td>${pnlCell}</td><td>${fmt(p.entry,8)}</td><td>${lastCell}</td><td>${pctCell}</td><td>${stopCell}</td><td>${tp1Cell}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.remainingQty,4)}</td><td>${fmt(p.riskUsdt,2)}</td><td>${fmt(p.score,0)}</td><td>${tw(p.entryTime)}</td><td class="reason">${htmlEscape((p.reasons||[]).slice(0,3).join(' · '))}</td></tr>`;
   }).join('') : '<tr><td class="sym muted" colspan="15">No open position</td></tr>';
 
   const activity = buildPositionActivity(state.positions || [], state.trades || []);
@@ -2461,7 +2461,7 @@ function paintAll(){
       event.reason ? (REASON_LABELS[event.reason] || event.reason) : '',
       event.note === 'reconstructed' ? '歷史資料重建' : '',
     ].filter(Boolean).join(' · ');
-    return `<tr><td class="sym">${symLink(event.symbol, event.marketProvider)}</td><td>${tw(event.time)}</td><td class="left">${htmlEscape(POSITION_EVENT_LABELS[event.type] || event.type)}</td><td>${qtyCell}</td><td>${event.price ? fmt(event.price,8) : '—'}</td><td>${fmt(event.remainingQty,4)}</td><td>${event.stop ? fmt(event.stop,8) : '—'}</td><td>${pnlCell}</td><td class="left muted">${htmlEscape(notes || '—')}</td></tr>`;
+    return `<tr><td class="sym">${symLink(event.symbol, event.marketProvider)}</td><td>${tw(event.time)}</td><td>${pnlCell}</td><td class="left">${htmlEscape(POSITION_EVENT_LABELS[event.type] || event.type)}</td><td>${qtyCell}</td><td>${event.price ? fmt(event.price,8) : '—'}</td><td>${fmt(event.remainingQty,4)}</td><td>${event.stop ? fmt(event.stop,8) : '—'}</td><td class="left muted">${htmlEscape(notes || '—')}</td></tr>`;
   }).join('') : '<tr><td class="sym muted" colspan="9">No position activity</td></tr>';
 
   const tradeStrategyFilter = document.getElementById('tradeStrategyFilter')?.value || '';
@@ -2481,7 +2481,7 @@ function paintAll(){
       ? `<span class="exit-detail">${exitSummary.legs.map((leg, index) => `${leg.type === 'tp1' ? 'TP1' : index === exitSummary.legs.length - 1 ? '末筆' : '分批'} ${fmt(leg.exit,8)} × ${fmt(leg.sharePct,0)}%`).join(' · ')}</span>`
       : '';
     const exitCell = `${fmt(exitSummary.averageExit,8)}${exitDetail}`;
-    return `<tr><td class="sym">${symLink(t.symbol, t.marketProvider)}</td><td class="left">${htmlEscape(strategyName(t))}</td><td>${sideLabel}</td><td>${fmt(t.entry,8)}</td><td>${exitCell}</td><td class="${signedClass(t.rMultiple)}">${fmt(t.rMultiple,2)}</td><td class="${signedClass(t.pnl)}">${fmt(t.pnl,2)}</td><td class="pos">${showPct(t.mfePct)}</td><td class="neg">${showPct(t.maePct)}</td><td>${fmt(t.score,0)}</td><td>${holdH}h</td><td>${tw(t.entryTime)}</td><td>${tw(t.exitTime)}</td><td class="left">${htmlEscape(REASON_LABELS[t.reason] || t.reason)}</td></tr>`;
+    return `<tr><td class="sym">${symLink(t.symbol, t.marketProvider)}</td><td class="left">${htmlEscape(strategyName(t))}</td><td>${sideLabel}</td><td class="${signedClass(t.pnl)}">${fmt(t.pnl,2)}</td><td>${fmt(t.entry,8)}</td><td>${exitCell}</td><td class="${signedClass(t.rMultiple)}">${fmt(t.rMultiple,2)}</td><td class="pos">${showPct(t.mfePct)}</td><td class="neg">${showPct(t.maePct)}</td><td>${fmt(t.score,0)}</td><td>${holdH}h</td><td>${tw(t.entryTime)}</td><td>${tw(t.exitTime)}</td><td class="left">${htmlEscape(REASON_LABELS[t.reason] || t.reason)}</td></tr>`;
   }).join('') : `<tr><td class="sym muted" colspan="14">${state.trades.length ? 'No matching trades' : 'No closed paper trade'}</td></tr>`;
   paintPnl();
   paintReview();
