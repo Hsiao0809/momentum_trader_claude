@@ -162,6 +162,13 @@
     ::-webkit-scrollbar-track{background:transparent}
     ::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
     ::-webkit-scrollbar-thumb:hover{background:var(--muted)}
+    @media(min-width:901px){
+      main{padding-bottom:18px;scroll-padding-bottom:8px}
+      #reviewSection{overflow:hidden}
+      #reviewSection .cols2{flex:1 1 auto;min-height:0;overflow:hidden}
+      #reviewSection .cols2>div{min-height:0;display:flex}
+      #reviewSection .table-wrap{min-height:0;max-height:none;flex:1 1 auto}
+    }
     @media(max-width:900px){html,body{overflow:auto}body{flex-direction:column}main{flex:none;height:auto;min-height:0;grid-template-rows:auto;overflow:visible}.metric-grid{grid-template-columns:repeat(4,1fr)}.cols2{grid-template-columns:1fr!important}.summary{max-width:100%}.trade-log-section .section-head{align-items:flex-start;flex-wrap:wrap}.trade-head-actions{width:100%;justify-content:flex-start;flex-wrap:wrap}.trade-log-section>.table-wrap{max-height:196px}.pnl-section-head{align-items:flex-start;flex-wrap:wrap}.pnl-toolbar{width:100%;justify-content:flex-start}.pnl-summary-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.pnl-stat:nth-child(2){border-right:0}.pnl-stat:nth-child(-n+2){border-bottom:1px solid var(--border)}#pnlSection{min-height:460px}#pnlSection.calendar-mode{min-height:570px}#pnlCanvas{height:220px}.pnl-chart-shell{min-height:220px}.pnl-day{min-height:52px;padding:5px}}
     @media(max-width:520px){.pnl-toolbar{display:grid;grid-template-columns:1fr;gap:6px}.pnl-toolbar .segmented{width:100%}.pnl-toolbar .segmented button{flex:1;padding:0 5px}#pnlSection{min-height:470px}#pnlSection.calendar-mode{min-height:600px}.pnl-day{min-height:48px}.pnl-day-value{font-size:9px}.pnl-month-total{max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
     @media(max-width:900px){.runtime-status{display:grid;grid-template-columns:1fr;gap:3px}.runtime-status .status{max-width:100%}}
