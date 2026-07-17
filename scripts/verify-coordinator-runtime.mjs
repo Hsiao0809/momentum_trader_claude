@@ -190,10 +190,19 @@ for (const chunk of chunks) {
 assert.equal(new TextDecoder().decode(joined), chunkFixture, 'UTF-8 state chunks must round-trip');
 assert.ok(chunks.every((chunk) => chunk.byteLength <= 1_500_000));
 
-const coordinatorTicksPerDay = 24 * 60 / 5;
-assert.equal(coordinatorTicksPerDay, 288);
-assert.ok(coordinatorTicksPerDay < 100000, 'coordinator requests stay within DO Free');
-assert.ok(coordinatorTicksPerDay * 6 < 100000, 'five state chunks plus metadata stay within DO Free');
+const coordinatorCronRequestsPerDay = 24 * 60 / 5;
+const maximumFullScansPerDay = 24 * 60 / 10;
+const scanBatches = 16 / 2;
+const scanAlarmRequestsPerDay = maximumFullScansPerDay * (scanBatches - 1);
+const maximumCoordinatorRequestsPerDay = coordinatorCronRequestsPerDay + scanAlarmRequestsPerDay;
+const maximumAlarmRowsWrittenPerDay = scanAlarmRequestsPerDay;
+assert.equal(coordinatorCronRequestsPerDay, 288);
+assert.equal(maximumCoordinatorRequestsPerDay, 1296);
+assert.ok(maximumCoordinatorRequestsPerDay < 100000, 'cron plus alarm requests stay within DO Free');
+assert.ok(
+  maximumCoordinatorRequestsPerDay * 6 + maximumAlarmRowsWrittenPerDay < 100000,
+  'five state chunks, metadata, and setAlarm rows stay within DO Free',
+);
 assert.ok(8 + 6 + 1 + 16 + 16 < 50, 'worst scan tick including universe retries stays within limit');
 
 console.log('coordinator runtime checks passed (atomic state, complete sorting, latest-price fills, free budgets)');

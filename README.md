@@ -16,8 +16,8 @@ Single-page momentum dashboard configured for Cloudflare Pages, with a Cloudflar
 The browser dashboard is only the UI. Continuous paper trading runs in `worker/src/index.js` on Cloudflare Workers:
 
 - Cron trigger: every 5 minutes forwards one request to SQLite Durable Object `PaperCoordinator`, whose higher per-request CPU allowance runs position management and a complete stale scan without browser involvement.
-- State storage and coordination: `PaperCoordinator` serializes cron/manual/reset mutations. On first access it imports the existing `PAPER_STATE` KV value without deleting the KV backup, then uses version-checked commits for external controls. State is UTF-8 chunked below the SQLite Durable Object 2MB row limit, so full trade/event history is retained as it grows.
-- Free-plan budget: 288 scheduled Durable Object requests per day. A normal one-chunk state uses about 576 rows written/day (chunk + metadata); even five chunks use about 1,728, below 100,000/day. There are no recurring KV lock/state writes or scan Workflow/Queue operations. KV remains only for the legacy import and notification status.
+- State storage and coordination: `PaperCoordinator` serializes cron/manual/reset mutations. On first access it imports the existing `PAPER_STATE` KV value without deleting the KV backup. State is UTF-8 chunked below the SQLite Durable Object 2MB row limit, so full trade/event history is retained as it grows.
+- Free-plan budget: 288 cron requests/day plus up to seven Durable Object alarm continuations for each complete 16-symbol scan. Using the conservative ceiling of one full scan every 10 minutes gives at most 1,296 coordinator requests/day. Including state chunks, metadata, and `setAlarm()` writes, the conservative ceilings are about 3,600 rows written/day for a one-chunk state and 8,784 for five chunks, below 100,000/day. There are no recurring KV lock/state writes or scan Workflow operations. KV remains only for the legacy import and notification status.
 - Market data: OKX USDT perpetual swaps, Gate-only USDT perpetual contracts, and 24/7 XYZ HIP-3 perpetuals on Hyperliquid
 - Profit protection: close 50% at +8% and move the remainder to break-even; the existing +15% profit lock and +20% TP1/trailing rules remain active
 - Pump classification: a fresh 15m impulse requires at least +4%, 5x baseline volume, and a strong close. It can only enter on the next bar; the following 12 hours block high-range consolidation entries, and a 35-60% retrace must print a bullish higher low before re-entry.
@@ -30,6 +30,16 @@ The browser dashboard is only the UI. Continuous paper trading runs in `worker/s
 - Subrequest safety: K-lines use OKX `history-candles`, Gate `candlesticks`, or Hyperliquid `candleSnapshot` with one request per symbol and no same-invocation retry. This prevents a burst of provider retries from exceeding Cloudflare's per-invocation subrequest limit.
 
 Binance Futures works from the browser, but Binance blocks Cloudflare Workers/Pages Functions from fetching the Futures API with a `403`, so the always-on runner uses OKX, Gate, and Hyperliquid XYZ public market data instead.
+
+## Worker control authentication
+
+All state-changing Worker routes require a bearer token. Before deploying this version, set a high-entropy Worker secret:
+
+```bash
+cmd /c npx wrangler secret put PAPER_CONTROL_TOKEN --config worker/wrangler.toml
+```
+
+Enter the same value in **設定與工具 → Worker token** in the dashboard. The dashboard keeps it in `sessionStorage`, so it is cleared when the browser tab session ends. Scheduled cron execution does not need the token. If the Worker secret is missing, control routes fail closed with `paper_control_auth_not_configured`; an invalid token returns `paper_control_unauthorized`.
 
 ## Open-position notifications
 
@@ -67,7 +77,7 @@ cmd /c npx wrangler secret put NOTIFY_WEBHOOK_URL --config worker/wrangler.toml
 Test the configured channel:
 
 ```bash
-cmd /c curl -X POST https://momentum-trader-claude-runner.siaosiao1016.workers.dev/notify/test
+cmd /c curl -X POST -H "Authorization: Bearer YOUR_CONTROL_TOKEN" https://momentum-trader-claude-runner.siaosiao1016.workers.dev/notify/test
 ```
 
 If no channel is configured, paper trading continues normally but notifications are skipped.
