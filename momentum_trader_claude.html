@@ -1962,6 +1962,9 @@ function buildPositionActivity(positions, trades, limit=200){
     .sort((a,b) => Number(b.time || 0) - Number(a.time || 0))
     .slice(0, limit);
 }
+function positionsNewestFirst(positions){
+  return [...(positions || [])].sort((a,b) => Number(b.entryTime || 0) - Number(a.entryTime || 0));
+}
 function statsFromTrades(trades){
   let gp = 0, gl = 0, wins = 0, r = 0, pnl = 0;
   trades.forEach(t => { const p = Number(t.pnl || 0), rr = Number(t.rMultiple || 0); pnl += p; r += rr; if(p >= 0){ gp += p; wins++; } else gl += Math.abs(p); });
@@ -2448,7 +2451,8 @@ function paintAll(){
 
   const totalUnreal = state.positions.reduce((a,p) => a + (unrealizedFor(p).pnl || 0), 0);
   document.getElementById('positionSummary').innerHTML = `${state.positions.length} open · equity <strong>${fmt(state.equity,2)}U</strong> · unreal <span class="${signedClass(totalUnreal)}">${fmt(totalUnreal,2)}U</span> · DD ${fmt(drawdown,2)}%`;
-  document.getElementById('positionsBody').innerHTML = state.positions.length ? state.positions.map(p => {
+  const orderedPositions = positionsNewestFirst(state.positions);
+  document.getElementById('positionsBody').innerHTML = orderedPositions.length ? orderedPositions.map(p => {
     const u = unrealizedFor(p);
     const lastCell = p.last ? fmt(p.last,8) : '<span class="muted">—</span>';
     const pctCell = u.pct === null ? '<span class="muted">—</span>' : `<span class="${signedClass(u.pct)}">${showPct(u.pct)}</span>`;
