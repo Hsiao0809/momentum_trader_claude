@@ -10,5 +10,8 @@
     "worker:deploy": "npx wrangler deploy --config worker/wrangler.toml",
     "worker:tail": "npx wrangler tail momentum-trader-claude-runner --config worker/wrangler.toml",
     "deploy:all": "npm run worker:deploy && npm run deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.112.0"
   }
 }

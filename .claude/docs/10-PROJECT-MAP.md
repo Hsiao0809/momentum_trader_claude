@@ -65,7 +65,7 @@
 - L1–70：常數（`STATE_KEY`、`OKX_API`、`GATE_API`、`DEFAULT_CFG`、`STRATEGY_SIDES`、`CORS_HEADERS`）
 - `handleRequest`（L70 起）HTTP API：
   - GET `/`（健康）、`/state`、`/prices`、`/snapshot`
-  - POST `/start`、`/stop`、`/reset`、`/config`、`/scan`、`/tick`、`/notify/test`
+  - POST `/start`、`/stop`、`/reset`、`/config`、`/scan`、`/tick`、`/notify/test`（全部要求 `PAPER_CONTROL_TOKEN` bearer token）
 - `PaperCoordinator.runTick`（cron 主流程）→ `updatePositions` → `createScanPlan` / `scanSignalPlanBatch` → `finalizeScanPlan` → `latestEntryPrices` / `openNewPositions`
 - 掃描預算邏輯：`scanUniverse`、`rankedInstruments`、`normalizeOkxTickers`、`normalizeGateTickers`、`deriveGateVolumeRatio`、`anomalyScore`、`buildTickerSnapshot`、`rotatingSlice`（OKX 優先、Gate-only 補充；完整 scan plan 必須正好 16 個 K-line、XYZ 保留 4 個；16/16 全成功後才發布並排序）
 - 狀態：`PaperCoordinator` 的 `storedState`/`saveStoredState`/`runControl` + `normalizeState`/`applyConfig`；所有控制與 tick 共用 `enqueue`，外部提交帶 `stateVersion`；完整 state 以 1.5MB UTF-8 chunks 儲存，避免單 row 2MB 上限；每筆 position 的 `events` 完整保留；持倉 K 線會以 `positionKlinesAfter` 驗證 `lastTime` 後的連續性，缺口未補齊時保留原時間、寫入 `position_history_gap` 並暫停新開倉
@@ -74,7 +74,7 @@
 
 ## 硬性外部約束（違反＝無聲翻車，數字以 README 為準）
 
-1. **免費儲存預算**：正常一個 state chunk 約 576 Durable Object row writes/日（chunk + metadata），五 chunks 約 1,728/日，遠低於 100,000/日；KV 不再有 cron lock/state write，只保留舊狀態相容讀取與通知狀態。→ tick 路徑新增持久化時仍須先計算每日用量。
+1. **免費儲存預算**：除了每日 288 次 cron，完整 16 檔掃描還會用 7 次 alarm continuation。以每 10 分鐘一次完整掃描的保守上限計算，最多 1,296 次 coordinator requests/日；連同 state chunks、metadata 與 `setAlarm()` row write，單 chunk 約 3,600 rows/日、五 chunks 約 8,784 rows/日，低於 100,000/日。KV 不再有 cron lock/state write，只保留舊狀態相容讀取與通知狀態。→ tick/scan/alarm 路徑新增持久化時仍須先計算每日用量。
    **「動到 tick/掃描/KV 路徑」的機械判準**：你的 diff 是否改變了每次 tick 的外部 fetch 次數或 KV write 次數？是 → 逐條核對本節；否（純計算邏輯、UI、文案）→ 不需。
 2. **掃描與 subrequest 預算**：完整 scan plan ≤ 16 個 K-line；含 8 個持倉、三市場 universe、BTC 情境和最多 16 個最新成交價時，掃描 tick 最壞約 44 個外部 subrequests，低於 Free 50。持倉 K-line 正常抓 8 根，落後時同一個 subrequest 動態擴大到最多 300 根（約 75 小時），不增加請求數。→ 不要加不設上限的迴圈 fetch。
 3. **Subrequest 上限**：通知走 Queue 就是為了避開掃描路徑的 subrequest 限制。→ 不要把通知改回掃描時同步直發。

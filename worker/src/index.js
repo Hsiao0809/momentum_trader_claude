@@ -77,9 +77,11 @@ const DEFAULT_CFG = {
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   'Cache-Control': 'no-store',
 };
+
+const CONTROL_PATHS = new Set(['/start', '/stop', '/reset', '/config', '/scan', '/tick', '/notify/test']);
 
 export default {
   async fetch(request, env, ctx) {
@@ -107,6 +109,11 @@ async function handleRequest(request, env) {
 
   const url = new URL(request.url);
   try {
+    if (request.method === 'POST' && CONTROL_PATHS.has(url.pathname)) {
+      const authError = controlAuthError(request, env);
+      if (authError) return authError;
+    }
+
     if (request.method === 'GET' && url.pathname === '/') {
       return json({ ok: true, service: 'momentum-trader-claude-runner' });
     }
@@ -154,6 +161,30 @@ async function handleRequest(request, env) {
   } catch (error) {
     return json({ ok: false, error: error.message || String(error) }, 500);
   }
+}
+
+function timingSafeEqual(left, right) {
+  const leftBytes = new TextEncoder().encode(String(left || ''));
+  const rightBytes = new TextEncoder().encode(String(right || ''));
+  const length = Math.max(leftBytes.length, rightBytes.length);
+  let mismatch = leftBytes.length ^ rightBytes.length;
+  for (let index = 0; index < length; index++) {
+    mismatch |= (leftBytes[index] || 0) ^ (rightBytes[index] || 0);
+  }
+  return mismatch === 0;
+}
+
+function controlAuthError(request, env) {
+  const expected = String(env.PAPER_CONTROL_TOKEN || '');
+  if (!expected) {
+    return json({ ok: false, error: 'paper_control_auth_not_configured' }, 503);
+  }
+  const authorization = request.headers.get('Authorization') || '';
+  const provided = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
+  if (!provided || !timingSafeEqual(provided, expected)) {
+    return json({ ok: false, error: 'paper_control_unauthorized' }, 401);
+  }
+  return null;
 }
 
 export class PaperCoordinator extends DurableObject {

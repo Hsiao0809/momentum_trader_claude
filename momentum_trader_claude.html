@@ -224,6 +224,8 @@
       <div class="controls">
         <label>Equity <input id="initialEquity" type="number" value="1000" min="100" step="100"> U</label>
         <label>Risk/trade <input id="riskPct" type="number" value="1" min="0.1" max="5" step="0.1">%</label>
+        <label>Worker token <input id="runnerControlToken" type="password" autocomplete="off" placeholder="Required for controls"></label>
+        <span class="muted" style="font-size:11px">只保留在目前瀏覽器分頁；啟停、重置、設定與手動掃描會使用此 token。</span>
       </div>
     </div>
     <div class="drawer-section">
@@ -434,6 +436,7 @@ const RUNNER_STALE_MS = 10 * 60 * 1000;
 const SCAN_STALE_WARN_MS = 20 * 60 * 1000;
 const BROWSER_NOTIFY_ENABLED_KEY = 'momentumBrowserNotificationsEnabled';
 const BROWSER_NOTIFY_SEEN_KEY = 'momentumLastBrowserNotificationId';
+const RUNNER_CONTROL_TOKEN_KEY = 'momentumRunnerControlToken';
 const TZ = 'Asia/Taipei';
 const LABELS = {
   pullback_uptrend: '上升趨勢回檔',
@@ -737,15 +740,30 @@ function setupCloudSync(){
 
 async function serverRequest(path, options={}){
   if(!SERVER_MODE) throw new Error('Worker API is not configured.');
+  const method = options.method || 'GET';
+  const headers = { 'Content-Type': 'application/json' };
+  const controlToken = sessionStorage.getItem(RUNNER_CONTROL_TOKEN_KEY) || '';
+  if(method !== 'GET' && controlToken) headers.Authorization = `Bearer ${controlToken}`;
   const res = await fetch(`${PAPER_API}${path}`, {
-    method: options.method || 'GET',
-    headers: { 'Content-Type': 'application/json' },
+    method,
+    headers,
     body: options.body ? JSON.stringify(options.body) : undefined,
     cache: 'no-store'
   });
   const data = await res.json().catch(() => ({}));
   if(!res.ok || data.ok === false) throw new Error(data.error || `${path} ${res.status}`);
   return data;
+}
+
+function setupRunnerAuth(){
+  const tokenEl = document.getElementById('runnerControlToken');
+  if(!tokenEl) return;
+  tokenEl.value = sessionStorage.getItem(RUNNER_CONTROL_TOKEN_KEY) || '';
+  tokenEl.addEventListener('change', () => {
+    const token = tokenEl.value.trim();
+    if(token) sessionStorage.setItem(RUNNER_CONTROL_TOKEN_KEY, token);
+    else sessionStorage.removeItem(RUNNER_CONTROL_TOKEN_KEY);
+  });
 }
 
 async function syncServerState(showStatus=false){
@@ -2599,6 +2617,7 @@ paintAll();
 setDashboardPage(dashboardPage, false);
 setupCapitalInputs();
 setupAutoScan();
+setupRunnerAuth();
 setupCloudSync();
 setupBrowserNotifications();
 setupLiveRefresh();

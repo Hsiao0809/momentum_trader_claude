@@ -3,6 +3,9 @@ main = "src/index.js"
 compatibility_date = "2026-06-26"
 workers_dev = true
 
+[secrets]
+required = ["PAPER_CONTROL_TOKEN"]
+
 [triggers]
 crons = ["*/5 * * * *"]
 

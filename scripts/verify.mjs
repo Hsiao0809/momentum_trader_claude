@@ -26,6 +26,10 @@ step('market context behavior and Worker/dashboard parity', () => {
   execFileSync(process.execPath, ['scripts/verify-market-context.mjs']);
 });
 
+step('Worker control authentication', () => {
+  execFileSync(process.execPath, ['scripts/verify-control-auth.mjs']);
+});
+
 step('recent signal retention and scan health behavior', () => {
   execFileSync(process.execPath, ['scripts/verify-recent-signals.mjs']);
 });
