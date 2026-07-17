@@ -29,6 +29,8 @@ const functionNames = [
   'normalizeGateKlines',
   'normalizeXyzKlines',
   'positionKlineLimit',
+  'positionNeedsAnchoredRecovery',
+  'positionTrailingGap',
   'positionKlinesAfter',
 ];
 const functions = new Function(
@@ -146,6 +148,8 @@ const now = Date.now();
 const currentOpen = Math.floor(now / intervalMs) * intervalMs;
 assert.equal(functions.positionKlineLimit({ lastTime: now - intervalMs }), 8);
 assert.equal(functions.positionKlineLimit({ lastTime: now - 400 * intervalMs }), 300);
+assert.equal(functions.positionNeedsAnchoredRecovery({ lastTime: now - intervalMs }, now), false);
+assert.equal(functions.positionNeedsAnchoredRecovery({ lastTime: now - 400 * intervalMs }, now), true);
 const contiguousRows = [currentOpen - 2 * intervalMs, currentOpen - intervalMs]
   .map((time) => [time, 1, 1, 1, 1, 1]);
 assert.deepEqual(
@@ -190,8 +194,27 @@ assert.throws(
   (error) => error.code === 'position_history_gap'
     && error.details.expectedTime === currentOpen - intervalMs,
 );
+assert.deepEqual(
+  functions.positionKlinesAfter(
+    { lastTime: currentOpen - 4 * intervalMs },
+    [currentOpen - 3 * intervalMs, currentOpen - 2 * intervalMs]
+      .map((time) => [time, 1, 1, 1, 1, 1]),
+    now,
+    { allowTrailingGap: true },
+  ),
+  [currentOpen - 3 * intervalMs, currentOpen - 2 * intervalMs]
+    .map((time) => [time, 1, 1, 1, 1, 1]),
+);
+assert.equal(
+  functions.positionTrailingGap({ lastTime: currentOpen - 3 * intervalMs }, now).missingBars,
+  2,
+);
 assert.match(source, /POSITION_KLINE_LOOKBACK_MAX = 300/);
-assert.match(source, /marketKlines\(provider, instId, '15m', positionKlineLimit\(p\)\)/);
+assert.match(source, /marketKlinesFrom\(provider, instId, p\.lastTime \|\| p\.entryTime, '15m'\)/);
+assert.match(source, /before: expectedTime - 1/);
+assert.match(source, /after: endTime \+ intervalMs/);
+assert.match(source, /from: Math\.floor\(expectedTime \/ 1000\)/);
+assert.match(source, /startTime: expectedTime, endTime/);
 assert.match(source, /new entries paused until candle history is continuous/);
 assert.match(source, /type: 'metaAndAssetCtxs', dex: 'xyz'/);
 assert.match(source, /type: 'candleSnapshot'/);

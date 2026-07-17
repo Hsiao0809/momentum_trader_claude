@@ -42,6 +42,10 @@ step('position history gap recovery behavior', () => {
   execFileSync(process.execPath, ['scripts/verify-position-history.mjs']);
 });
 
+step('conservative intrabar stop ordering', () => {
+  execFileSync(process.execPath, ['scripts/verify-intrabar-order.mjs']);
+});
+
 step('XYZ reserved scan allocation', () => {
   execFileSync(process.execPath, ['scripts/verify-xyz-scan.mjs']);
 });

@@ -1059,26 +1059,31 @@ async function updatePositionIds(state, positionIds, options = {}) {
     try {
       const provider = p.marketProvider || providerFromInstId(p.instId);
       const instId = p.instId || instIdFromSymbol(p.symbol, provider);
-      const rows = closedKlines(await marketKlines(provider, instId, '15m', positionKlineLimit(p)));
-      const pendingRows = positionKlinesAfter(p, rows);
+      const recoveryMode = positionNeedsAnchoredRecovery(p);
+      const fetchedRows = recoveryMode
+        ? await marketKlinesFrom(provider, instId, p.lastTime || p.entryTime, '15m')
+        : await marketKlines(provider, instId, '15m', positionKlineLimit(p));
+      const rows = closedKlines(fetchedRows);
+      const pendingRows = positionKlinesAfter(p, rows, Date.now(), { allowTrailingGap: recoveryMode });
       delete p.historyGap;
       for (const bar of pendingRows) {
         p.lastTime = kTime(bar);
         const high = kHigh(bar);
         const low = kLow(bar);
         const close = kClose(bar);
+        const stopHit = stopAtBarOpen(p, high, low);
+        if (stopHit) {
+          p.last = stopHit.price;
+          closePosition(state, p, stopHit.price, stopHit.reason, kTime(bar));
+          closed = true;
+          break;
+        }
         p.highest = Math.max(p.highest || p.entry, high);
         p.lowest = Math.min(p.lowest || p.entry, low);
         p.last = close;
 
         recordProtectionEvents(p, kTime(bar));
         takeBreakEvenPartial(state, p, kTime(bar));
-        const effectiveStop = effectiveStopFor(p);
-        if (p.side === 'short' ? high >= effectiveStop : low <= effectiveStop) {
-          closePosition(state, p, effectiveStop, stopReasonFor(p), kTime(bar));
-          closed = true;
-          break;
-        }
         if (!p.tp1Done && (p.side === 'short' ? low <= p.tp1 : high >= p.tp1)) {
           takeTP1(state, p, kTime(bar));
         }
@@ -1096,7 +1101,22 @@ async function updatePositionIds(state, positionIds, options = {}) {
         }
       }
 
-      if (!closed && markToMarket) {
+      if (!closed && recoveryMode) {
+        const gap = positionTrailingGap(p);
+        if (gap) {
+          const recoveryGap = {
+            ...gap,
+            symbol: p.symbol,
+            provider,
+            recoveryPending: true,
+            detectedAt: Date.now(),
+          };
+          p.historyGap = recoveryGap;
+          historyGaps.push(recoveryGap);
+        }
+      }
+
+      if (!closed && markToMarket && !p.historyGap) {
         const price = await tickerPrice(provider, instId);
         p.last = price;
         p.highest = Math.max(p.highest || p.entry, price);
@@ -1565,6 +1585,44 @@ async function marketKlines(provider, instId, interval = '15m', limit = 130) {
     .map((row) => [Number(row[0]), Number(row[1]), Number(row[2]), Number(row[3]), Number(row[4]), Number(row[5])])
     .filter((row) => row.every((value) => Number.isFinite(value)))
     .sort((a, b) => a[0] - b[0]);
+}
+
+async function marketKlinesFrom(provider, instId, lastTime, interval = '15m', limit = POSITION_KLINE_LOOKBACK_MAX) {
+  const intervalMs = INTERVAL_MS[interval];
+  if (!intervalMs) throw new Error(`Unsupported interval: ${interval}`);
+  const expectedTime = Math.floor(Number(lastTime) / intervalMs) * intervalMs + intervalMs;
+  const latestClosedTime = Math.floor(Date.now() / intervalMs) * intervalMs - intervalMs;
+  if (!Number.isFinite(expectedTime) || expectedTime > latestClosedTime) return [];
+  const endTime = Math.min(latestClosedTime, expectedTime + (limit - 1) * intervalMs);
+  let rows;
+  if (provider === 'gate') {
+    rows = normalizeGateKlines(await gate('/api/v4/futures/usdt/candlesticks', {
+      contract: instId,
+      interval,
+      from: Math.floor(expectedTime / 1000),
+      to: Math.floor(endTime / 1000),
+    }, 0, 0));
+  } else if (provider === 'xyz') {
+    rows = normalizeXyzKlines(await hyperliquidInfo({
+      type: 'candleSnapshot',
+      req: { coin: instId, interval, startTime: expectedTime, endTime },
+    }, 0, 0));
+  } else {
+    const rawRows = await okx('/api/v5/market/history-candles', {
+      instId,
+      bar: interval,
+      before: expectedTime - 1,
+      after: endTime + intervalMs,
+      limit,
+    }, 0, 0);
+    rows = rawRows
+      .map((row) => [Number(row[0]), Number(row[1]), Number(row[2]), Number(row[3]), Number(row[4]), Number(row[5])])
+      .filter((row) => row.every((value) => Number.isFinite(value)))
+      .sort((a, b) => a[0] - b[0]);
+  }
+  return rows
+    .filter((row) => kTime(row) >= expectedTime && kTime(row) <= endTime)
+    .slice(0, limit);
 }
 
 function normalizeGateKlines(rows) {
@@ -2365,6 +2423,12 @@ function stopReasonFor(p) {
   return 'stop';
 }
 
+function stopAtBarOpen(p, high, low) {
+  const price = effectiveStopFor(p);
+  const touched = p.side === 'short' ? high >= price : low <= price;
+  return touched ? { price, reason: stopReasonFor(p) } : null;
+}
+
 function positionSize(equity, entry, stop, cfg) {
   const riskUsdt = equity * cfg.riskPerTrade;
   const perUnitRisk = Math.max(Math.abs(entry - stop), entry * 0.001);
@@ -2384,7 +2448,28 @@ function positionKlineLimit(position) {
   return clamp(missingBars + 4, POSITION_KLINE_LOOKBACK_MIN, POSITION_KLINE_LOOKBACK_MAX);
 }
 
-function positionKlinesAfter(position, rows, now = Date.now()) {
+function positionNeedsAnchoredRecovery(position, now = Date.now()) {
+  const lastTime = Number(position?.lastTime || position?.entryTime || 0);
+  if (!lastTime) return true;
+  const missingBars = Math.ceil(Math.max(0, now - lastTime) / INTERVAL_MS['15m']);
+  return missingBars + 4 > POSITION_KLINE_LOOKBACK_MAX;
+}
+
+function positionTrailingGap(position, now = Date.now()) {
+  const intervalMs = INTERVAL_MS['15m'];
+  const lastTime = Number(position?.lastTime || position?.entryTime || 0);
+  const latestClosedTime = Math.floor(now / intervalMs) * intervalMs - intervalMs;
+  const expectedTime = Math.floor(lastTime / intervalMs) * intervalMs + intervalMs;
+  if (!lastTime || expectedTime > latestClosedTime) return null;
+  return {
+    lastTime,
+    expectedTime,
+    firstAvailableTime: null,
+    missingBars: Math.floor((latestClosedTime - expectedTime) / intervalMs) + 1,
+  };
+}
+
+function positionKlinesAfter(position, rows, now = Date.now(), options = null) {
   const lastTime = Number(position?.lastTime || position?.entryTime || 0);
   const pendingRows = rows.filter((row, index) => (
     kTime(row) > lastTime && (!index || kTime(row) !== kTime(rows[index - 1]))
@@ -2395,7 +2480,9 @@ function positionKlinesAfter(position, rows, now = Date.now()) {
   const expectedTime = Math.floor(lastTime / intervalMs) * intervalMs + intervalMs;
   const latestClosedTime = Math.floor(now / intervalMs) * intervalMs - intervalMs;
   const firstMismatch = pendingRows.find((row, index) => kTime(row) !== expectedTime + index * intervalMs);
-  const trailingGap = pendingRows.length && kTime(pendingRows[pendingRows.length - 1]) < latestClosedTime;
+  const trailingGap = !options?.allowTrailingGap
+    && pendingRows.length
+    && kTime(pendingRows[pendingRows.length - 1]) < latestClosedTime;
   if (expectedTime <= latestClosedTime && (!pendingRows.length || firstMismatch || trailingGap)) {
     const firstAvailableTime = firstMismatch ? kTime(firstMismatch) : null;
     const mismatchIndex = firstMismatch ? pendingRows.indexOf(firstMismatch) : pendingRows.length;

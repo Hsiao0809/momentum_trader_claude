@@ -1193,6 +1193,11 @@ function stopReasonFor(p){
   if(p.earlyTrigger && h >= p.earlyTrigger) return 'early_stop';
   return 'stop';
 }
+function stopAtBarOpen(p, high, low){
+  const price = effectiveStopFor(p);
+  const touched = p.side === 'short' ? high >= price : low <= price;
+  return touched ? { price, reason:stopReasonFor(p) } : null;
+}
 function strategyKey(m){
   if(m.isImpulsePullback) return 'impulse_pullback_reclaim';
   if(m.isPullback) return 'pullback_uptrend';
@@ -1471,6 +1476,19 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
   let exit = kClose(rows[lastIndex]), exitTime = kTime(rows[lastIndex]), reason = 'time_exit';
   for(let i=entryIndex;i<=lastIndex;i++){
     const bar = rows[i], high = kHigh(bar), low = kLow(bar), close = kClose(bar);
+    const stopHit = stopAtBarOpen({
+      side, entry, stop, tp1Done, highest, lowest,
+      lockTrigger:risk.lockTrigger, lockLevel:risk.lockLevel,
+      beTrigger:risk.beTrigger, earlyTrigger, earlyLevel,
+      trailPct:risk.trailPct,
+    }, high, low);
+    if(stopHit){
+      exit=stopHit.price; exitTime=kTime(bar);
+      realized+=remainingQty*(side === 'short' ? entry-exit : exit-entry);
+      mae=Math.min(mae, side === 'short' ? (entry-exit)/entry*100 : (exit/entry-1)*100);
+      reason=stopHit.reason;
+      break;
+    }
     highest = Math.max(highest, high); lowest = Math.min(lowest, low);
     if(side === 'short'){
       mfe = Math.max(mfe, (entry - low)  / entry * 100);
@@ -1481,13 +1499,6 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
         remainingQty-=sq;
         bePartialDone=true;
         stop=entry;
-      }
-      const es = tp1Done ? Math.min(risk.lockLevel, lowest*(1+risk.trailPct/100))
-               : lowest <= risk.lockTrigger ? Math.min(stop, risk.lockLevel)
-               : lowest <= risk.beTrigger   ? Math.min(stop, entry) : stop;
-      if(high >= es){
-        exit=es; exitTime=kTime(bar); realized+=remainingQty*(entry-exit);
-        reason=tp1Done?'trail_stop':lowest<=risk.lockTrigger?'lock_stop':lowest<=risk.beTrigger?'be_stop':'stop'; break;
       }
       if(!tp1Done && low <= risk.tp1){ const sq=remainingQty*0.5; realized+=sq*(entry-risk.tp1); remainingQty-=sq; tp1Done=true; }
       if(i - entryIndex >= 192 && close > entry * 0.99 && !tp1Done && !bePartialDone){ exit=close; exitTime=kTime(bar); realized+=remainingQty*(entry-exit); reason='stale_exit'; break; }
@@ -1501,14 +1512,6 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
         remainingQty-=sq;
         bePartialDone=true;
         stop=entry;
-      }
-      const es = tp1Done ? Math.max(risk.lockLevel, highest*(1-risk.trailPct/100))
-               : highest >= risk.lockTrigger ? Math.max(stop, risk.lockLevel)
-               : highest >= risk.beTrigger   ? Math.max(stop, entry)
-               : (earlyTrigger && highest >= earlyTrigger) ? Math.max(stop, earlyLevel) : stop;
-      if(low <= es){
-        exit=es; exitTime=kTime(bar); realized+=remainingQty*(exit-entry);
-        reason=tp1Done?'trail_stop':highest>=risk.lockTrigger?'lock_stop':highest>=risk.beTrigger?'be_stop':(earlyTrigger&&highest>=earlyTrigger)?'early_stop':'stop'; break;
       }
       if(!tp1Done && high >= risk.tp1){ const sq=remainingQty*0.5; realized+=sq*(risk.tp1-entry); remainingQty-=sq; tp1Done=true; }
       if(i - entryIndex >= 192 && close < entry * 1.01 && !tp1Done && !bePartialDone){ exit=close; exitTime=kTime(bar); realized+=remainingQty*(exit-entry); reason='stale_exit'; break; }
