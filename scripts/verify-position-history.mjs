@@ -35,21 +35,46 @@ const marketKlines = async (_provider, instId) => {
   return [[currentOpen - intervalMs, 100, 101, 99, 100, 1]];
 };
 
+let anchoredFetches = 0;
+const marketKlinesFrom = async (_provider, instId, lastTime) => {
+  assert.equal(instId, 'RECOVERY');
+  anchoredFetches++;
+  const firstTime = lastTime + intervalMs;
+  const latestClosedTime = currentOpen - intervalMs;
+  const count = Math.min(300, Math.floor((latestClosedTime - firstTime) / intervalMs) + 1);
+  return Array.from({ length: count }, (_, index) => (
+    [firstTime + index * intervalMs, 100, 101, 99, 100, 1]
+  ));
+};
+
 const functions = new Function(
-  'INTERVAL_MS', 'marketKlines', 'closedKlines', 'providerFromInstId', 'instIdFromSymbol',
-  'positionKlineLimit', 'kTime', 'kHigh', 'kLow', 'kClose', 'recordProtectionEvents',
+  'INTERVAL_MS', 'marketKlines', 'marketKlinesFrom', 'closedKlines', 'providerFromInstId', 'instIdFromSymbol',
+  'positionKlineLimit', 'positionNeedsAnchoredRecovery', 'positionTrailingGap',
+  'kTime', 'kHigh', 'kLow', 'kClose', 'recordProtectionEvents',
   'takeBreakEvenPartial', 'effectiveStopFor', 'stopReasonFor', 'closePosition', 'takeTP1',
-  'tickerPrice', 'sleep', 'scanFailureReason', 'OKX_RATE_LIMIT_COOLDOWN_MS', 'console',
+  'stopAtBarOpen', 'tickerPrice', 'sleep', 'scanFailureReason', 'OKX_RATE_LIMIT_COOLDOWN_MS', 'console',
   `${extractFunction(source, 'positionKlinesAfter')}
    ${extractFunction(source, 'updatePositionIds', 'async function')}
    return { positionKlinesAfter, updatePositionIds };`,
 )(
   { '15m': intervalMs },
   marketKlines,
+  marketKlinesFrom,
   (rows) => rows,
   () => 'okx',
   (symbol) => symbol,
   () => 300,
+  (p) => p.id === 'RECOVERY',
+  (p) => {
+    const expectedTime = p.lastTime + intervalMs;
+    const latestClosedTime = currentOpen - intervalMs;
+    return expectedTime > latestClosedTime ? null : {
+      lastTime: p.lastTime,
+      expectedTime,
+      firstAvailableTime: null,
+      missingBars: Math.floor((latestClosedTime - expectedTime) / intervalMs) + 1,
+    };
+  },
   (row) => Number(row[0]),
   (row) => Number(row[2]),
   (row) => Number(row[3]),
@@ -60,6 +85,7 @@ const functions = new Function(
   () => 'stop',
   () => { throw new Error('unexpected close'); },
   () => { throw new Error('unexpected TP1'); },
+  () => null,
   async () => { throw new Error('unexpected ticker'); },
   async () => {},
   () => 'other',
@@ -113,6 +139,21 @@ assert.equal(recovered.historyGaps.length, 0);
 assert.equal(gap.historyGap, undefined, 'a fully continuous replay clears the gap');
 assert.equal(gap.lastTime, currentOpen - intervalMs);
 
+const recovering = position('RECOVERY', currentOpen - 306 * intervalMs);
+const recoveryState = { positions: [recovering], equity: 1000, cfg: { maxHoldHours: 1000 } };
+const firstChunk = await functions.updatePositionIds(recoveryState, ['RECOVERY'], { markToMarket: false });
+assert.equal(anchoredFetches, 1);
+assert.equal(recovering.lastTime, currentOpen - 6 * intervalMs);
+assert.equal(firstChunk.historyGaps.length, 1, 'partial anchored replay keeps the entry gate closed');
+assert.equal(firstChunk.historyGaps[0].missingBars, 5);
+assert.equal(firstChunk.historyGaps[0].recoveryPending, true);
+
+const secondChunk = await functions.updatePositionIds(recoveryState, ['RECOVERY'], { markToMarket: false });
+assert.equal(anchoredFetches, 2);
+assert.equal(recovering.lastTime, currentOpen - intervalMs);
+assert.equal(secondChunk.historyGaps.length, 0, 'the gap clears after the final continuous chunk');
+assert.equal(recovering.historyGap, undefined);
+
 let latestPriceCalls = 0;
 let openCalls = 0;
 const orchestration = new Function(
@@ -146,4 +187,4 @@ assert.equal(await orchestration.openNewPositionsAfterUpdate(coordinatorState, {
 assert.equal(latestPriceCalls, 1);
 assert.equal(openCalls, 1);
 
-console.log('position history recovery checks passed (isolation, persistence, recovery, and entry gate)');
+console.log('position history recovery checks passed (isolation, persistence, anchored chunks, and entry gate)');
