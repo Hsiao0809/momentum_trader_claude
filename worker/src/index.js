@@ -914,10 +914,10 @@ function eligibleEntrySignals(state, signals = state.signals) {
   if (state.pausedUntil && Date.now() < state.pausedUntil) return;
 
   const openSymbols = new Set(state.positions.map((p) => baseAsset(p.symbol)));
-  // 停損冷卻 24h；獲利出場（trail/lock）也冷卻 12h：剛走完一段暴漲的幣最危險（7/18 AKE +21.8 後 4 分鐘停損案例）
+  // 注意：獲利出場（trail/lock）不冷卻——連環強勢幣（US/AKE 型）是獲利來源，
+  // 追高回入的風險由極端延伸罰分處理（7/16-18 重放：加 12h 冷卻淨 -42.8）
   const stoppedRecent = new Set((state.trades || [])
-    .filter((t) => (['stop', 'be_stop', 'early_stop'].includes(t.reason) && Date.now() - t.exitTime < cfg.symbolStopCooldownMs)
-      || (['trail_stop', 'lock_stop'].includes(t.reason) && Date.now() - t.exitTime < 12 * 60 * 60 * 1000))
+    .filter((t) => ['stop', 'be_stop', 'early_stop'].includes(t.reason) && Date.now() - t.exitTime < cfg.symbolStopCooldownMs)
     .map((t) => baseAsset(t.symbol)));
   return [...(signals || [])]
     .sort(signalSort)
