@@ -913,14 +913,16 @@ function eligibleEntrySignals(state, signals = state.signals) {
   const cfg = state.cfg;
   if (state.pausedUntil && Date.now() < state.pausedUntil) return;
 
-  const openSymbols = new Set(state.positions.map((p) => p.symbol));
+  const openSymbols = new Set(state.positions.map((p) => baseAsset(p.symbol)));
+  // 停損冷卻 24h；獲利出場（trail/lock）也冷卻 12h：剛走完一段暴漲的幣最危險（7/18 AKE +21.8 後 4 分鐘停損案例）
   const stoppedRecent = new Set((state.trades || [])
-    .filter((t) => ['stop', 'be_stop', 'early_stop'].includes(t.reason) && Date.now() - t.exitTime < cfg.symbolStopCooldownMs)
-    .map((t) => t.symbol));
+    .filter((t) => (['stop', 'be_stop', 'early_stop'].includes(t.reason) && Date.now() - t.exitTime < cfg.symbolStopCooldownMs)
+      || (['trail_stop', 'lock_stop'].includes(t.reason) && Date.now() - t.exitTime < 12 * 60 * 60 * 1000))
+    .map((t) => baseAsset(t.symbol)));
   return [...(signals || [])]
     .sort(signalSort)
-    .filter((sig) => !openSymbols.has(sig.symbol)
-      && !stoppedRecent.has(sig.symbol)
+    .filter((sig) => !openSymbols.has(baseAsset(sig.symbol))
+      && !stoppedRecent.has(baseAsset(sig.symbol))
       && sig.score >= cfg.paperMinScore
       && !(sig.strategyKey === 'narrative_momentum' && sig.score < cfg.paperMinScore + 8));
 }
@@ -966,12 +968,12 @@ async function openNewPositions(state, env, latestPrices = null) {
   if (state.pausedUntil && Date.now() < state.pausedUntil) return;
   const candidates = eligibleEntrySignals(state) || [];
   const prices = latestPrices || await latestEntryPrices(state, candidates);
-  const openSymbols = new Set(state.positions.map((p) => p.symbol));
+  const openSymbols = new Set(state.positions.map((p) => baseAsset(p.symbol)));
 
   let totalRisk = state.positions.reduce((sum, p) => sum + Number(p.riskUsdt || 0), 0);
   for (const originalSignal of candidates) {
     if (state.positions.length >= cfg.maxPositions) break;
-    if (openSymbols.has(originalSignal.symbol)) continue;
+    if (openSymbols.has(baseAsset(originalSignal.symbol))) continue;
     const sig = repriceSignal(originalSignal, prices[signalPriceKey(originalSignal)]);
     if (!sig) continue;
 
@@ -1026,7 +1028,7 @@ async function openNewPositions(state, env, latestPrices = null) {
     });
     state.positions.push(position);
     totalRisk += sized.riskUsdt;
-    openSymbols.add(sig.symbol);
+    openSymbols.add(baseAsset(sig.symbol));
     await notifyNewPosition(env, position, state);
   }
 }
@@ -1813,6 +1815,9 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
       reasons.push(`pump retraced ${marketContext.retracePct.toFixed(1)}% and printed a bullish higher-low confirmation`);
     }
     if (momentum1h >= 4 && position24h >= 0.85) { score -= 14; reasons.push('penalty: chasing the top'); }
+    // 極端延伸罰分：24h 低點起漲 60% 以上的高位進場，波動區間遠寬於停損（7/18 AKE 追高案例；60% 門檻對主流幣回測零影響）
+    const runup24h = pct(Math.min(...last24h.map(kClose)), price) || 0;
+    if (runup24h >= 60) { score -= 15; reasons.push(`extension penalty: +${runup24h.toFixed(1)}% above 24h low`); }
     score += 5;
     reasons.push('above 50-period EMA with positive slope');
     score = Math.round(clamp(score, 0, 100));
@@ -1832,6 +1837,8 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
     const key = strategyKey(metrics);
     // 追價策略硬性擋單：1h 已衝 4% 以上不追
     if (key === 'strong_momentum_breakout' && momentum1h >= 4) return null;
+    // 餘燼單硬性擋單：量能已縮且 1h 停滯＝買在漲完後的停頓（7/18 SMSN/DRAM 三連停損型態）
+    if ((key === 'volume_ignition' || key === 'narrative_momentum') && volumeRatio < 1 && momentum1h < 1) return null;
     // 放量單專屬窄停損：ATR 門檻已保證標的在動，2% 停損換更高賺賠比
     if (key === 'volume_ignition') { risk.stop = price * 0.98; risk.stopPct = 2; metrics.stopPct = 2; }
     // 回檔/題材單停損上限 4%：贏單 MAE 不超過 3.5%，更寬的停損只稀釋賺賠比
@@ -2006,9 +2013,12 @@ function closePosition(state, p, exit, reason, exitTime) {
   state.trades.unshift({ symbol: p.symbol, instId: p.instId, marketProvider: p.marketProvider || providerFromInstId(p.instId), strategyKey: p.strategyKey, strategyLabel: p.strategyLabel, side: p.side || 'long', entryTime: p.entryTime, exitTime, entry: p.entry, exit, qty: p.qty, pnl: totalPnl, rMultiple: safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct, maePct, score: p.score, partialExits: p.partialExits || [], events: p.events || [] });
   state.equityCurve.push({ timeMs: exitTime, equity: state.equity, drawdownPct: safeDiv(state.peakEquity - state.equity, state.peakEquity, 0) * 100 });
   state.consecutiveLosses = totalPnl < 0 ? state.consecutiveLosses + 1 : 0;
-  if (state.consecutiveLosses >= 3) {
-    state.pausedUntil = Date.now() + 6 * 60 * 60 * 1000;
-    state.consecutiveLosses = 0;
+  // 滑動窗口連損暫停：6h 內 ≥3 筆虧損出場才暫停（含本筆），暫停中繼續虧會延長；
+  // 連續計數會被 be_stop 小贏重置，7/18 因此吞了 3+4 筆滿停損（回測 vC5 驗證優於連續計數）
+  if (totalPnl < 0) {
+    const lossWindowMs = 6 * 60 * 60 * 1000;
+    const recentLosses = (state.trades || []).filter((t) => t.pnl < 0 && exitTime - t.exitTime <= lossWindowMs).length;
+    if (recentLosses >= 3) state.pausedUntil = Math.max(Number(state.pausedUntil || 0), exitTime + lossWindowMs);
   }
   if (safeDiv(state.peakEquity - state.equity, state.peakEquity, 0) >= 0.12) state.running = false;
 }
@@ -2618,6 +2628,14 @@ function symbolFromInstId(instId) {
     return instId.slice(0, -'_USDT'.length).replaceAll('_', '') + 'USDT';
   }
   return instId.replace('-USDT-SWAP', 'USDT').replaceAll('-', '');
+}
+
+// 跨市場同資產識別：DRAM(xyz) 與 DRAMUSDT(gate) 是同一標的，去掉 USDT 後綴比對，
+// 防止同一資產在多個市場重複開倉（7/18 DRAM 雙倉雙停損 -24 案例）
+function baseAsset(symbol) {
+  const s = String(symbol || '').toUpperCase();
+  const base = s.endsWith('USDT') ? s.slice(0, -4) : s;
+  return base || s;
 }
 
 function providerFromInstId(instId) {
