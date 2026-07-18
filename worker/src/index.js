@@ -2636,8 +2636,8 @@ function symbolFromInstId(instId) {
 // （判準：同一家公司/同一資產，計價單位可以不同；WTI 的 CL 與 BRENTOIL 是不同資產，不併）
 const SYMBOL_ALIASES = {
   SMSN: 'SAMSUNG', // 三星：xyz SMSN vs gate/okx SAMSUNG
-  SKHY: 'SKHYNIX', // SK 海力士 ~165 計價版：xyz SKHY vs okx SKHY-USDT-SWAP
-  SKHX: 'SKHYNIX', // SK 海力士 ~1400 計價版：xyz SKHX vs okx SKHYNIX-USDT-SWAP
+  SKHY: 'SKHYNIX', // SK 海力士美股掛牌（~165）：xyz SKHY vs okx SKHY-USDT-SWAP
+  SKHX: 'SKHYNIX', // SK 海力士韓股掛牌（~1400）：xyz SKHX vs okx SKHYNIX-USDT-SWAP
 };
 function baseAsset(symbol) {
   const s = String(symbol || '').toUpperCase();
