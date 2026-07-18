@@ -1311,6 +1311,9 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
       reasons.push(`pump retraced ${marketContext.retracePct.toFixed(1)}% and printed a bullish higher-low confirmation`);
     }
     if(momentum1h >= 4 && position24h >= 0.85){ score -= 14; reasons.push('penalty: chasing the top'); }
+    // 極端延伸罰分：24h 低點起漲 60% 以上的高位進場，波動區間遠寬於停損（7/18 AKE 追高案例；60% 門檻對主流幣回測零影響）
+    const runup24h = pct(Math.min(...last24h.map(kClose)), price) || 0;
+    if(runup24h >= 60){ score -= 15; reasons.push(`extension penalty: +${runup24h.toFixed(1)}% above 24h low`); }
     score += 5; reasons.push('above 50-period EMA with positive slope');
     score = Math.round(clamp(score, 0, 100));
     if(score < minScore) return null;
@@ -1328,6 +1331,8 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
     const key = strategyKey(metrics);
     // 追價策略硬性擋單：1h 已衝 4% 以上不追
     if(key === 'strong_momentum_breakout' && momentum1h >= 4) return null;
+    // 餘燼單硬性擋單：量能已縮且 1h 停滯＝買在漲完後的停頓（7/18 SMSN/DRAM 三連停損型態）
+    if((key === 'volume_ignition' || key === 'narrative_momentum') && volumeRatio < 1 && momentum1h < 1) return null;
     // 放量單專屬窄停損：ATR 門檻已保證標的在動，2% 停損換更高賺賠比
     if(key === 'volume_ignition'){ risk.stop = price * 0.98; risk.stopPct = 2; metrics.stopPct = 2; }
     // 回檔/題材單停損上限 4%：贏單 MAE 不超過 3.5%，更寬的停損只稀釋賺賠比
@@ -1530,8 +1535,8 @@ function summarize(trades){
   return { initialEquity:CFG.initialEquity, endingEquity:equity, netPnl:equity-CFG.initialEquity, netReturnPct:pct(CFG.initialEquity, equity)||0, tradeCount:trades.length, winRatePct:safeDiv(wins, trades.length, 0)*100, profitFactor:safeDiv(gp, gl, gp || 0), maxDrawdownPct:maxDd, avgR: trades.length ? mean(trades.map(t=>t.rMultiple)) : 0 };
 }
 function applyPortfolio(trades){
-  const selected = [], active = [], activeSymbols = new Map();
-  let equity = CFG.initialEquity, peak = equity, consecutive = 0, pausedUntil = 0;
+  const selected = [], active = [], activeSymbols = new Map(), lossTimes = [];
+  let equity = CFG.initialEquity, peak = equity, pausedUntil = 0;
   trades.sort((a,b)=>a.entryTime-b.entryTime);
   for(const t of trades){
     while(active.length && active[0] <= t.entryTime) active.shift();
@@ -1540,7 +1545,11 @@ function applyPortfolio(trades){
     if(safeDiv(peak-equity, peak, 0) >= 0.12) break;
     selected.push(t); active.push(t.exitTime); active.sort((a,b)=>a-b); activeSymbols.set(t.symbol, t.exitTime);
     equity += t.pnl; peak = Math.max(peak, equity);
-    if(t.pnl < 0){ consecutive++; if(consecutive >= 3){ pausedUntil = t.exitTime + 6*60*60*1000; consecutive = 0; } } else consecutive = 0;
+    // 滑動窗口連損暫停：6h 內 ≥3 筆虧損出場才暫停，暫停中繼續虧會延長；分散的虧損不觸發（回測 vC5：優於連續計數）
+    if(t.pnl < 0){
+      lossTimes.push(t.exitTime);
+      if(lossTimes.filter(x => t.exitTime - x <= 6*60*60*1000).length >= 3) pausedUntil = Math.max(pausedUntil, t.exitTime + 6*60*60*1000);
+    }
   }
   return selected;
 }
@@ -1635,6 +1644,8 @@ async function paperTick(){
   if(state.pausedUntil && nowMs() < state.pausedUntil){ saveState(); paperTickRunning = false; return; }
   if(!state.signals.length || nowMs() - state.lastScanAt > 3*60*1000) await scanSignals();
   const openSymbols = new Set(state.positions.map(p => p.symbol));
+  // 注意：獲利出場（trail/lock）不冷卻——連環強勢幣（US/AKE 型）是獲利來源，
+  // 追高回入的風險由極端延伸罰分處理（7/16-18 重放：加 12h 冷卻淨 -42.8）
   const stoppedRecent = new Set((state.trades || [])
     .filter(t => ['stop','be_stop','early_stop'].includes(t.reason) && nowMs() - t.exitTime < CFG.symbolStopCooldownMs)
     .map(t => t.symbol));
@@ -1734,7 +1745,13 @@ function closePosition(p, exit, reason, exitTime){
   state.trades.unshift({ symbol:p.symbol, strategyKey:p.strategyKey, strategyLabel:p.strategyLabel, side:p.side||'long', entryTime:p.entryTime, exitTime, entry:p.entry, exit, qty:p.qty, pnl:totalPnl, rMultiple:safeDiv(totalPnl, p.riskUsdt, 0), reason, mfePct, maePct, score:p.score, partialExits:p.partialExits||[], events:p.events||[] });
   state.equityCurve.push({ timeMs:exitTime, equity:state.equity, drawdownPct:safeDiv(state.peakEquity-state.equity, state.peakEquity, 0)*100 });
   state.consecutiveLosses = totalPnl < 0 ? state.consecutiveLosses + 1 : 0;
-  if(state.consecutiveLosses >= 3){ state.pausedUntil = nowMs() + 6*60*60*1000; state.consecutiveLosses = 0; }
+  // 滑動窗口連損暫停：6h 內 ≥3 筆虧損出場才暫停（含本筆），暫停中繼續虧會延長；
+  // 連續計數會被 be_stop 小贏重置，7/18 因此吞了 3+4 筆滿停損（回測 vC5 驗證優於連續計數）
+  if(totalPnl < 0){
+    const lossWindowMs = 6*60*60*1000;
+    const recentLosses = (state.trades || []).filter(t => t.pnl < 0 && exitTime - t.exitTime <= lossWindowMs).length;
+    if(recentLosses >= 3) state.pausedUntil = Math.max(state.pausedUntil || 0, exitTime + lossWindowMs);
+  }
   if(safeDiv(state.peakEquity-state.equity, state.peakEquity, 0) >= 0.12) state.running = false;
 }
 function takeBreakEvenPartial(p, exitTime){
