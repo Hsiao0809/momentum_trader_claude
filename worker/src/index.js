@@ -1742,6 +1742,8 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
   // ══ 多頭分支：上升趨勢（EMA 上方且斜率為正）══
   if (aboveEma && emaSlope >= 0) {
     if (marketContext.isImpulseFollow) {
+      // 不追第二棒：impulse 棒高點必須是近 8 根最高，反抽棒頭上有失敗高點不追（7/20 AKE 爆頂後追入案例；主流幣回測零成本）
+      if (kHigh(lastBar) < Math.max(...c.slice(-9, -1).map(kHigh))) return null;
       const risk = buildRisk(price, atrValue, 'long', marketContext.impulseLow * 0.995);
       let score = 82;
       const reasons = [
@@ -2030,7 +2032,8 @@ function takeBreakEvenPartial(state, p, exitTime) {
     : (p.highest || p.entry) >= p.beTrigger;
   if (!triggered) return false;
 
-  const closeQty = p.remainingQty * 0.5;
+  // 保本分批比例 25%（原 50%）：+8% 減倉是純犧牲上檔，保護來自停損拉保本；50→35→25→0 回測單調遞增（L2 消融），取 25% 保留機制待下窗口再驗
+  const closeQty = p.remainingQty * 0.25;
   const partialPnl = p.side === 'short'
     ? closeQty * (p.entry - p.beTrigger)
     : closeQty * (p.beTrigger - p.entry);
