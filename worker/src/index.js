@@ -1856,6 +1856,13 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
     if (key === 'strong_momentum_breakout' && momentum1h >= 4) return null;
     // 餘燼單硬性擋單：量能已縮且 1h 停滯＝買在漲完後的停頓（7/18 SMSN/DRAM 三連停損型態）
     if ((key === 'volume_ignition' || key === 'narrative_momentum') && volumeRatio < 1 && momentum1h < 1) return null;
+    // 回檔深度理智帶：太深（>60%）＝趨勢已破（NBIS 型），無條件擋；太淺（<15%）＝才停頓就接刀（USUSDT/BANK 型），
+    // 但淺回檔只在高波動（ATR≥2%）小幣才是雜訊接刀，低波動主流幣的淺回檔是真回檔會贏，故淺尾加 ATR 條件。
+    // 實盤 33 筆：此帶 -51.4→-5.9 零誤殺；OKX 主流幣回測 158.2 不變（ATR 條件豁免主流幣，見 70-STRATEGY-PLAYBOOK）
+    if (key === 'pullback_uptrend') {
+      const swingRetr = safeDiv(swingHigh - price, swingHigh - swingLow, 0) * 100;
+      if ((swingRetr < 15 && atrValue >= 2) || swingRetr > 60) return null;
+    }
     // 放量單專屬窄停損：ATR 門檻已保證標的在動，2% 停損換更高賺賠比
     if (key === 'volume_ignition') { risk.stop = price * 0.98; risk.stopPct = 2; metrics.stopPct = 2; }
     // 回檔/題材單停損上限 4%：贏單 MAE 不超過 3.5%，更寬的停損只稀釋賺賠比
