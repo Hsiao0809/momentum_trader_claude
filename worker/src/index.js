@@ -963,9 +963,24 @@ function repriceSignal(signal, latestPrice) {
   };
 }
 
+// Prop 日內熔斷：當日已實現從峰值回吐 ≥2.5% 或當日淨虧 ≥3%（以日起始權益計）→ 當日不再開新倉。
+// 只讀 state.trades（已實現），與 pausedUntil/滑動窗口同一套資料；未涵蓋未平倉浮虧（見 LESSONS）。
+function dailyRiskHalt(state, now) {
+  const dayStart = Math.floor((now + 8 * 60 * 60 * 1000) / (24 * 60 * 60 * 1000)) * (24 * 60 * 60 * 1000) - 8 * 60 * 60 * 1000;
+  const today = (state.trades || []).filter((t) => t.exitTime >= dayStart).sort((a, b) => a.exitTime - b.exitTime);
+  if (!today.length) return false;
+  let cum = 0;
+  let peak = 0;
+  for (const t of today) { cum += t.pnl; peak = Math.max(peak, cum); }
+  const dayStartEquity = state.equity - cum;
+  if (dayStartEquity <= 0) return false;
+  return (peak > 0 && peak - cum >= dayStartEquity * 0.025) || (cum <= -dayStartEquity * 0.03);
+}
+
 async function openNewPositions(state, env, latestPrices = null) {
   const cfg = state.cfg;
   if (state.pausedUntil && Date.now() < state.pausedUntil) return;
+  if (dailyRiskHalt(state, Date.now())) return;
   const candidates = eligibleEntrySignals(state) || [];
   const prices = latestPrices || await latestEntryPrices(state, candidates);
   const openSymbols = new Set(state.positions.map((p) => baseAsset(p.symbol)));
@@ -1845,8 +1860,8 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
     if (key === 'volume_ignition') { risk.stop = price * 0.98; risk.stopPct = 2; metrics.stopPct = 2; }
     // 回檔/題材單停損上限 4%：贏單 MAE 不超過 3.5%，更寬的停損只稀釋賺賠比
     if ((key === 'pullback_uptrend' || key === 'narrative_momentum') && risk.stopPct > 4) { risk.stop = price * 0.96; risk.stopPct = 4; metrics.stopPct = 4; }
-    // 回檔單專屬 +4% 早期保護：浮盈 +4% 後停損拉到 -1%
-    const earlyTrigger = key === 'pullback_uptrend' ? price * 1.04 : undefined;
+    // 回檔單專屬 +3% 早期保護：浮盈 +3% 後停損拉到 -1%（原 +4%；實盤重放 20 筆停損中 6 筆 MFE 落在 3-4%，降到 +3% 把這批從 -1R 救成 -0.25R，對贏家零影響）
+    const earlyTrigger = key === 'pullback_uptrend' ? price * 1.03 : undefined;
     const earlyLevel = key === 'pullback_uptrend' ? price * 0.99 : undefined;
     return { scannedAt, symbol, instId, score, strategyKey: key, strategyLabel: LABELS[key], side: 'long', entry: price, lastPrice: price, stop: risk.stop, tp1: risk.tp1, beTrigger: risk.beTrigger, lockTrigger: risk.lockTrigger, lockLevel: risk.lockLevel, earlyTrigger, earlyLevel, trailPct: risk.trailPct, atrPct: atrValue, quoteVolume, reasons, metrics };
   }
