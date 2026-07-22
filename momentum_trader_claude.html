@@ -468,7 +468,11 @@ const CFG = {
   paperMinScore: 82,
   maxHoldHours: 72,
   cooldownBars: 96,
-  symbolStopCooldownMs: 24 * 60 * 60 * 1000
+  symbolStopCooldownMs: 24 * 60 * 60 * 1000,
+  // 動能熄火出場：已過 be 減倉、且進場 ATR≥momentumMinAtr% 的高波動標的，連續 momentumStallBars 根 15m 收盤未創新高(多)/新低(空)→了結剩餘。
+  // 低波動慢磨標的(股票代幣)豁免。stall=8 是實盤重放/回測的積極值(峰頂，非最穩健，可調)；不理想改這兩個數字即可。
+  momentumStallBars: 8,
+  momentumMinAtr: 1
 };
 let state = loadState();
 let latestPrices = {};
@@ -1485,7 +1489,7 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
   const earlyLevel = strategyKey === 'pullback_uptrend' ? entry * 0.99 : null;
   const sized = positionSize(equity, entry, risk.stop);
   let remainingQty = sized.qty, realized = 0, bePartialDone = false, tp1Done = false, stop = risk.stop;
-  let highest = entry, lowest = entry, mfe = 0, mae = 0;
+  let highest = entry, lowest = entry, mfe = 0, mae = 0, lastExtremeIdx = entryIndex;
   const lastIndex = Math.min(rows.length - 1, entryIndex + Math.floor(CFG.maxHoldHours * 60 / 15));
   let exit = kClose(rows[lastIndex]), exitTime = kTime(rows[lastIndex]), reason = 'time_exit';
   for(let i=entryIndex;i<=lastIndex;i++){
@@ -1503,7 +1507,14 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
       reason=stopHit.reason;
       break;
     }
+    if(side === 'short' ? low < lowest : high > highest) lastExtremeIdx = i;
     highest = Math.max(highest, high); lowest = Math.min(lowest, low);
+    // 動能熄火出場（見 CFG 註解）：已過 be、ATR 夠高、連續 momentumStallBars 根未創新極值 → 了結剩餘
+    if(bePartialDone && atrValue >= CFG.momentumMinAtr && (i - lastExtremeIdx) >= CFG.momentumStallBars){
+      exit=close; exitTime=kTime(bar);
+      realized += remainingQty * (side === 'short' ? entry-exit : exit-entry);
+      reason='momentum_exit'; break;
+    }
     if(side === 'short'){
       mfe = Math.max(mfe, (entry - low)  / entry * 100);
       mae = Math.min(mae, (entry - high) / entry * 100);
@@ -1704,7 +1715,7 @@ async function paperTick(){
     const sized = positionSize(state.equity, sig.entry, sig.stop);
     if(totalRisk + sized.riskUsdt > state.equity * CFG.maxTotalRisk) break;
     const entryTime = nowMs();
-    const position = { id:`p_${entryTime}_${sig.symbol}`, symbol:sig.symbol, strategyKey:sig.strategyKey, strategyLabel:sig.strategyLabel, side:sig.side||'long', entryTime, lastTime:entryTime, signalEntry:sig.signalEntry, pricedAt:sig.pricedAt, entry:sig.entry, last:sig.entry, qty:sized.qty, remainingQty:sized.qty, stop:sig.stop, originalStop:sig.stop, tp1:sig.tp1, beTrigger:sig.beTrigger, lockTrigger:sig.lockTrigger, lockLevel:sig.lockLevel, earlyTrigger:sig.earlyTrigger, earlyLevel:sig.earlyLevel, bePartialEnabled:true, bePartialDone:false, tp1Done:false, trailPct:sig.trailPct, highest:sig.entry, lowest:sig.entry, score:sig.score, riskUsdt:sized.riskUsdt, realizedPnl:0, partialExits:[], events:[], reasons:sig.reasons };
+    const position = { id:`p_${entryTime}_${sig.symbol}`, symbol:sig.symbol, strategyKey:sig.strategyKey, strategyLabel:sig.strategyLabel, side:sig.side||'long', entryTime, lastTime:entryTime, signalEntry:sig.signalEntry, pricedAt:sig.pricedAt, entry:sig.entry, last:sig.entry, qty:sized.qty, remainingQty:sized.qty, stop:sig.stop, originalStop:sig.stop, tp1:sig.tp1, beTrigger:sig.beTrigger, lockTrigger:sig.lockTrigger, lockLevel:sig.lockLevel, earlyTrigger:sig.earlyTrigger, earlyLevel:sig.earlyLevel, bePartialEnabled:true, bePartialDone:false, tp1Done:false, trailPct:sig.trailPct, highest:sig.entry, lowest:sig.entry, score:sig.score, riskUsdt:sized.riskUsdt, realizedPnl:0, partialExits:[], events:[], reasons:sig.reasons, atrPct:sig.atrPct, momExtreme:sig.entry, barsSinceExtreme:0 };
     recordPositionEvent(position, { type:'open', time:entryTime, price:position.entry, qtyDelta:position.qty, remainingQty:position.qty, stop:position.stop });
     state.positions.push(position);
     totalRisk += sized.riskUsdt; openSymbols.add(sig.symbol);
@@ -1836,11 +1847,21 @@ async function updatePositions(){
         const high = kHigh(bar), low = kLow(bar), close = kClose(bar);
         p.highest = Math.max(p.highest, high); p.lowest = Math.min(p.lowest, low);
         p.last = close;
+        // 動能熄火出場（見 CFG 註解）：用獨立的收盤高水位計數，與 tick 更新的 p.highest 脫鉤
+        const barExt = p.side==='short' ? low : high;
+        const prevExt = Number(p.momExtreme ?? p.entry);
+        const madeNew = p.side==='short' ? barExt < prevExt : barExt > prevExt;
+        p.momExtreme = p.side==='short' ? Math.min(prevExt, barExt) : Math.max(prevExt, barExt);
+        p.barsSinceExtreme = madeNew ? 0 : (Number(p.barsSinceExtreme||0) + 1);
         recordProtectionEvents(p, kTime(bar));
         takeBreakEvenPartial(p, kTime(bar));
         const effectiveStop = effectiveStopFor(p);
         if(p.side==='short' ? high>=effectiveStop : low<=effectiveStop){
           closePosition(p, effectiveStop, stopReasonFor(p), kTime(bar));
+          closed = true; break;
+        }
+        if(p.bePartialDone && Number(p.atrPct||0) >= CFG.momentumMinAtr && Number(p.barsSinceExtreme||0) >= CFG.momentumStallBars){
+          closePosition(p, close, 'momentum_exit', kTime(bar));
           closed = true; break;
         }
         if(!p.tp1Done && (p.side==='short' ? low<=p.tp1 : high>=p.tp1)){

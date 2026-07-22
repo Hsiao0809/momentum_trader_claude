@@ -55,6 +55,10 @@ const DEFAULT_CFG = {
   paperMinScore: 82,
   maxHoldHours: 72,
   cooldownBars: 96,
+  // 動能熄火出場：已過 be 減倉、且進場 ATR≥momentumMinAtr% 的高波動標的，連續 momentumStallBars 根 15m 收盤未創新高(多)/新低(空)→了結剩餘。
+  // 低波動慢磨標的(股票代幣)豁免。stall=8 是積極值(峰頂，可調)；不理想改這兩個數字即可。
+  momentumStallBars: 8,
+  momentumMinAtr: 1,
   symbolStopCooldownMs: 24 * 60 * 60 * 1000,
   scanLimit: 35,
   maxKlineScans: 16,
@@ -1032,6 +1036,9 @@ async function openNewPositions(state, env, latestPrices = null) {
       partialExits: [],
       events: [],
       reasons: sig.reasons,
+      atrPct: sig.atrPct,
+      momExtreme: sig.entry,
+      barsSinceExtreme: 0,
     };
     recordPositionEvent(position, {
       type: 'open',
@@ -1098,6 +1105,17 @@ async function updatePositionIds(state, positionIds, options = {}) {
         p.highest = Math.max(p.highest || p.entry, high);
         p.lowest = Math.min(p.lowest || p.entry, low);
         p.last = close;
+        // 動能熄火出場（見 DEFAULT_CFG 註解）：用獨立的收盤高水位計數，與 tick 更新的 p.highest 脫鉤
+        const barExt = p.side === 'short' ? low : high;
+        const prevExt = Number(p.momExtreme ?? p.entry);
+        const madeNew = p.side === 'short' ? barExt < prevExt : barExt > prevExt;
+        p.momExtreme = p.side === 'short' ? Math.min(prevExt, barExt) : Math.max(prevExt, barExt);
+        p.barsSinceExtreme = madeNew ? 0 : (Number(p.barsSinceExtreme || 0) + 1);
+        if (p.bePartialDone && Number(p.atrPct || 0) >= state.cfg.momentumMinAtr && Number(p.barsSinceExtreme || 0) >= state.cfg.momentumStallBars) {
+          closePosition(state, p, close, 'momentum_exit', kTime(bar));
+          closed = true;
+          break;
+        }
 
         recordProtectionEvents(p, kTime(bar));
         takeBreakEvenPartial(state, p, kTime(bar));
