@@ -46,12 +46,14 @@ assert.match(worker, /STATE_CHUNK_BYTES = 1_500_000/);
 assert.match(worker, /SCAN_CONTINUATION_DELAY_MS = 1_000/);
 assert.match(worker, /GATE_RATE_LIMIT_BACKOFF_BASE_MS = 30_000/);
 assert.match(worker, /GATE_RATE_LIMIT_BACKOFF_MAX_MS = 10 \* 60 \* 1000/);
+assert.match(worker, /GATE_RATE_LIMIT_MAX_RETRIES = 3/);
+assert.match(worker, /GATE_RATE_LIMIT_COOLDOWN_MS = 10 \* 60 \* 1000/);
 assert.match(worker, /this\.ctx\.storage\.transaction/);
 assert.match(worker, /this\.ctx\.storage\.setAlarm\(Date\.now\(\) \+ delay\)/);
 assert.match(worker, /async alarm\(\)/);
 assert.doesNotMatch(worker, /while \(plan\.cursor < plan\.tickers\.length\)/);
 assert.match(worker, /Paper state chunk length mismatch/);
-assert.match(worker, /successfulScanCount < plan\.tickers\.length/);
+assert.match(worker, /successfulScanCount \+ skippedScanCount < plan\.tickers\.length/);
 assert.match(worker, /plan\.tickers\.length !== requiredCount/);
 assert.match(worker, /universeTier: 'reserve'/);
 assert.match(worker, /fillCryptoScanBudget\(cryptoCandidates, cryptoRanked, cryptoBudget\)/);
@@ -78,6 +80,7 @@ const runTick = Function(
   'recoverLastFailedNotification',
   'flushPendingNotifications',
   'hasActiveScanPlan',
+  'scanPlanExpired',
   'applyPositionUpdateStatus',
   'updatePositions',
   'scanRetryDelayMs',
@@ -87,6 +90,7 @@ const runTick = Function(
   () => {},
   async () => false,
   (state) => Boolean(state.scanPlan),
+  () => false,
   (state, result) => {
     state.positionHistoryGaps = result.historyGaps;
     return result;
@@ -155,6 +159,14 @@ const scanRetryDelayMs = Function(
 assert.equal(scanRetryDelayMs(rateLimitedPlan, retryStartedAt), 30_000);
 assert.equal(scanRetryDelayMs(rateLimitedPlan, rateLimitedPlan.nextRetryAt), 1_000);
 
+const scanPlanExpiredSource = extractFunction(worker, 'scanPlanExpired');
+const scanPlanExpired = Function(
+  'DEFAULT_CFG',
+  `${scanPlanExpiredSource}; return scanPlanExpired;`,
+)({ scanStaleMs: 600_000 });
+assert.equal(scanPlanExpired({ createdAt: 1_000 }, { scanStaleMs: 10_000 }, 11_001), true);
+assert.equal(scanPlanExpired({ createdAt: 1_000 }, { scanStaleMs: 10_000 }, 11_000), false);
+
 const scanFailureReasonSource = extractFunction(worker, 'scanFailureReason');
 const scanFailureReason = Function(`${scanFailureReasonSource}; return scanFailureReason;`)();
 assert.equal(scanFailureReason(new Error('Scan batch failed: gate_rate_limit:2')), 'gate_rate_limit');
@@ -162,12 +174,14 @@ assert.equal(scanFailureReason(new Error('Scan batch failed: gate_rate_limit:2')
 const continueScanSource = extractMethod(worker, 'async continueScan() {');
 const continueScan = Function(
   'hasActiveScanPlan',
+  'scanPlanExpired',
   'scanRetryDelayMs',
   'pendingScanResponse',
   'advanceScanPlan',
   continueScanSource.replace('async continueScan() {', 'async function continueScan() {') + '; return continueScan;',
 )(
   (state) => Boolean(state.scanPlan),
+  () => false,
   scanRetryDelayMs,
   (state, retryInMs) => ({ scanPending: true, retryInMs, cursor: state.scanPlan.cursor }),
   async () => { throw new Error('scan must not run before the retry window ends'); },
@@ -223,8 +237,10 @@ const makeAdvanceScanPlan = (scanBatch, createPlan, assertUniverse = () => {}) =
   'COMPLETE_SCAN_BATCH_SIZE',
   'createScanPlan',
   'assertCompleteScanUniverse',
+  'GATE_RATE_LIMIT_MAX_RETRIES',
+  'GATE_RATE_LIMIT_COOLDOWN_MS',
   `${advanceScanPlanSource}; return advanceScanPlan;`,
-)(scanBatch, 2, createPlan, assertUniverse);
+)(scanBatch, 2, createPlan, assertUniverse, 3, 600_000);
 const basePlan = {
   cursor: 0,
   tickers: Array.from({ length: 16 }, (_, index) => ({
@@ -274,6 +290,22 @@ await assert.rejects(() => makeAdvanceScanPlan(
   async () => { throw new Error('unexpected rebuild'); },
 )({ cfg: {} }, basePlan), /Scan batch failed: gate_rate_limit:1/);
 
+const gateCircuitState = { cfg: {}, gateRateLimitUntil: 0 };
+const gateCircuitPlan = await makeAdvanceScanPlan(
+  async (plan) => ({
+    ...plan,
+    cursor: 2,
+    failedScanCount: 2,
+    failedSymbols: ['GATE-A', 'GATE-B'],
+    failedReasonCounts: { gate_rate_limit: 2 },
+  }),
+  async () => { throw new Error('unexpected rebuild'); },
+)(gateCircuitState, { ...basePlan, retryCount: 3, tickers: gatePlan.tickers });
+assert.equal(gateCircuitPlan.cursor, 2, 'the rate-limited batch must be consumed after bounded retries');
+assert.equal(gateCircuitPlan.skippedScanCount, 2);
+assert.equal(gateCircuitPlan.gateRateLimitUntil, gateCircuitState.gateRateLimitUntil);
+assert.ok(gateCircuitState.gateRateLimitUntil > Date.now(), 'Gate must be isolated after bounded retries');
+
 const finalizeSource = extractFunction(worker, 'finalizeScanPlan');
 const finalize = Function(
   'positiveInt',
@@ -293,6 +325,22 @@ const scanState = { cfg: { maxKlineScans: 16, scanStaleMs: 600000 } };
 assert.throws(() => finalize(scanState, {
   createdAt: Date.now(), cursor: 15, tickers: Array(15).fill({}), successfulScanCount: 15,
 }), /Incomplete scan universe: 15\/16/);
+const degradedScanState = { cfg: { maxKlineScans: 16, scanStaleMs: 600000 }, recentSignals: [] };
+assert.doesNotThrow(() => finalize(degradedScanState, {
+  createdAt: Date.now(),
+  cursor: 16,
+  tickers: Array(16).fill({ marketProvider: 'gate' }),
+  successfulScanCount: 14,
+  skippedScanCount: 2,
+  failedScanCount: 2,
+  failedSymbols: ['GATE-A', 'GATE-B'],
+  skippedSymbols: ['GATE-A', 'GATE-B'],
+  failedReasonCounts: { gate_rate_limit: 2 },
+  signals: [],
+  meta: {},
+  btcContextOk: true,
+  gateRateLimitUntil: Date.now() + 60_000,
+}));
 assert.doesNotMatch(worker, /state\.trades = state\.trades\.slice/);
 assert.doesNotMatch(worker, /state\.equityCurve = state\.equityCurve\.slice/);
 
