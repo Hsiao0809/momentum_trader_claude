@@ -345,7 +345,21 @@ export class PaperCoordinator extends DurableObject {
       recoverLastFailedNotification(state);
       if (await flushPendingNotifications(state, this.env)) await this.saveStoredState(state);
 
-      if (hasActiveScanPlan(state)) {
+      const scanPending = hasActiveScanPlan(state);
+      const forceScan = Boolean(options.forceScan || state.forceScanRequested);
+      const onlyScan = Boolean(options.onlyScan || state.manualScanOnly);
+      const scanStale = !state.signals.length || now - (state.lastScanAt || 0) >= state.cfg.scanStaleMs;
+      const willScan = forceScan || scanStale;
+      if (!state.running && !state.positions.length && !willScan && !onlyScan && !scanPending) {
+        return { skipped: true, reason: 'paper-stopped' };
+      }
+
+      const positionUpdate = applyPositionUpdateStatus(
+        state,
+        // A partial scan can be retried later; a crossed stop cannot wait for it.
+        await updatePositions(state, { markToMarket: scanPending || !willScan }),
+      );
+      if (scanPending) {
         await this.saveStoredState(state);
         await this.scheduleScanContinuation();
         return {
@@ -357,19 +371,6 @@ export class PaperCoordinator extends DurableObject {
           openPositions: state.positions.length,
         };
       }
-
-      const forceScan = Boolean(options.forceScan || state.forceScanRequested);
-      const onlyScan = Boolean(options.onlyScan || state.manualScanOnly);
-      const scanStale = !state.signals.length || now - (state.lastScanAt || 0) >= state.cfg.scanStaleMs;
-      const willScan = forceScan || scanStale;
-      if (!state.running && !state.positions.length && !willScan && !onlyScan) {
-        return { skipped: true, reason: 'paper-stopped' };
-      }
-
-      const positionUpdate = applyPositionUpdateStatus(
-        state,
-        await updatePositions(state, { markToMarket: !willScan }),
-      );
       if (willScan) {
         let plan = await createScanPlan(state);
         assertCompleteScanUniverse(state, plan);

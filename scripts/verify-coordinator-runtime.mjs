@@ -20,6 +20,19 @@ function extractFunction(source, name) {
   throw new Error(`Could not extract ${name}`);
 }
 
+function extractMethod(source, signature) {
+  const start = source.indexOf(signature);
+  assert.notEqual(start, -1, `${signature} must exist`);
+  const brace = start + signature.length - 1;
+  let depth = 0;
+  for (let index = brace; index < source.length; index++) {
+    if (source[index] === '{') depth++;
+    if (source[index] === '}') depth--;
+    if (depth === 0) return source.slice(start, index + 1);
+  }
+  throw new Error(`Could not extract ${signature}`);
+}
+
 assert.match(worker, /export class PaperCoordinator extends DurableObject/);
 assert.match(wrangler, /class_name = "PaperCoordinator"/);
 assert.match(wrangler, /new_sqlite_classes = \["PaperCoordinator"\]/);
@@ -57,6 +70,49 @@ assert.ok(createIndex > 0 && advanceIndex > createIndex && pendingIndex > advanc
 assert.ok(completeMethodIndex > 0 && finalizeIndex > completeMethodIndex);
 assert.ok(safeOpenIndex > finalizeIndex, 'full scan must sort before the safe opening gate');
 assert.ok(latestIndex > safeOpenIndex && openIndex > latestIndex, 'safe opening must fetch latest prices before entry');
+
+const runTickSource = extractMethod(worker, 'async runTick(options = {}) {');
+const runTick = Function(
+  'recoverLastFailedNotification',
+  'flushPendingNotifications',
+  'hasActiveScanPlan',
+  'applyPositionUpdateStatus',
+  'updatePositions',
+  runTickSource.replace('async runTick(options = {}) {', 'async function runTick(options = {}) {') + '; return runTick;',
+)(
+  () => {},
+  async () => false,
+  (state) => Boolean(state.scanPlan),
+  (state, result) => {
+    state.positionHistoryGaps = result.historyGaps;
+    return result;
+  },
+  async (_state, options) => {
+    assert.deepEqual(options, { markToMarket: true }, 'pending scans must still mark positions to market');
+    pendingScanOrder.push('updatePositions');
+    return { historyGaps: [] };
+  },
+);
+const pendingScanOrder = [];
+const pendingScanState = {
+  running: true,
+  positions: [{ id: 'crossed-stop' }],
+  signals: [{}],
+  cfg: { scanStaleMs: 600000 },
+  scanPlan: { cursor: 14, tickers: Array(16).fill({}) },
+};
+const pendingScanResult = await runTick.call({
+  env: {},
+  storedState: async () => pendingScanState,
+  saveStoredState: async () => { pendingScanOrder.push('save'); },
+  scheduleScanContinuation: async () => { pendingScanOrder.push('schedule'); },
+}, { reason: 'cron' });
+assert.equal(pendingScanResult.scanPending, true);
+assert.deepEqual(
+  pendingScanOrder,
+  ['updatePositions', 'save', 'schedule'],
+  'a pending scan must update stops before saving and scheduling its continuation',
+);
 
 const fillCryptoScanBudgetSource = extractFunction(worker, 'fillCryptoScanBudget');
 const fillCryptoScanBudget = Function(
