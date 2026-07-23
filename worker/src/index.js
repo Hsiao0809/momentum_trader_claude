@@ -20,6 +20,8 @@ const POSITION_KLINE_LOOKBACK_MIN = 8;
 const POSITION_KLINE_LOOKBACK_MAX = 300;
 const COMPLETE_SCAN_BATCH_SIZE = 2;
 const SCAN_CONTINUATION_DELAY_MS = 1_000;
+const GATE_RATE_LIMIT_BACKOFF_BASE_MS = 30_000;
+const GATE_RATE_LIMIT_BACKOFF_MAX_MS = 10 * 60 * 1000;
 const OKX_RATE_LIMIT_COOLDOWN_MS = 10 * 60 * 1000;
 const OKX_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
 
@@ -269,8 +271,9 @@ export class PaperCoordinator extends DurableObject {
     return pending;
   }
 
-  async scheduleScanContinuation() {
-    await this.ctx.storage.setAlarm(Date.now() + SCAN_CONTINUATION_DELAY_MS);
+  async scheduleScanContinuation(delayMs = SCAN_CONTINUATION_DELAY_MS) {
+    const delay = Math.max(SCAN_CONTINUATION_DELAY_MS, Number(delayMs) || SCAN_CONTINUATION_DELAY_MS);
+    await this.ctx.storage.setAlarm(Date.now() + delay);
   }
 
   async savePendingScan(state, plan) {
@@ -279,14 +282,7 @@ export class PaperCoordinator extends DurableObject {
     state.manualScanOnly = false;
     await this.saveStoredState(state);
     await this.scheduleScanContinuation();
-    return {
-      ok: true,
-      scanPending: true,
-      stateVersion: state.stateVersion,
-      scannedCount: Number(plan.cursor || 0),
-      plannedScanCount: plan.tickers.length,
-      openPositions: state.positions.length,
-    };
+    return pendingScanResponse(state);
   }
 
   async completeScan(state, plan) {
@@ -317,17 +313,39 @@ export class PaperCoordinator extends DurableObject {
   async continueScan() {
     const state = await this.storedState();
     if (!hasActiveScanPlan(state)) return { ok: true, skipped: true, reason: 'no-active-scan' };
+    const nextRetryAt = Number(state.scanPlan.nextRetryAt || 0);
+    const retryDelay = scanRetryDelayMs(state.scanPlan);
+    if (nextRetryAt > Date.now()) {
+      await this.scheduleScanContinuation(retryDelay);
+      return pendingScanResponse(state, retryDelay);
+    }
     try {
       const plan = await advanceScanPlan(state, state.scanPlan);
       if (plan.cursor < plan.tickers.length) return this.savePendingScan(state, plan);
       return this.completeScan(state, plan);
     } catch (error) {
+      const deferred = await this.deferRateLimitedScan(state, state.scanPlan, error);
+      if (deferred) return deferred;
       state.lastError = `${error.message || error}`;
       state.lastErrorAt = Date.now();
       if (state.lastError === 'Scan plan expired before publication') state.scanPlan = null;
       await this.saveStoredState(state).catch(() => {});
       throw error;
     }
+  }
+
+  async deferRateLimitedScan(state, plan, error) {
+    if (scanFailureReason(error) !== 'gate_rate_limit') return null;
+    const retryPlan = withGateRateLimitRetry(plan);
+    state.scanPlan = retryPlan;
+    state.forceScanRequested = false;
+    state.manualScanOnly = false;
+    state.lastError = `${error.message || error}`;
+    state.lastErrorAt = Date.now();
+    const retryDelay = scanRetryDelayMs(retryPlan);
+    await this.saveStoredState(state);
+    await this.scheduleScanContinuation(retryDelay);
+    return pendingScanResponse(state, retryDelay);
   }
 
   async alarm() {
@@ -345,36 +363,37 @@ export class PaperCoordinator extends DurableObject {
       recoverLastFailedNotification(state);
       if (await flushPendingNotifications(state, this.env)) await this.saveStoredState(state);
 
-      if (hasActiveScanPlan(state)) {
-        await this.saveStoredState(state);
-        await this.scheduleScanContinuation();
-        return {
-          ok: true,
-          scanPending: true,
-          stateVersion: state.stateVersion,
-          scannedCount: Number(state.scanPlan.cursor || 0),
-          plannedScanCount: state.scanPlan.tickers.length,
-          openPositions: state.positions.length,
-        };
-      }
-
+      const scanPending = hasActiveScanPlan(state);
       const forceScan = Boolean(options.forceScan || state.forceScanRequested);
       const onlyScan = Boolean(options.onlyScan || state.manualScanOnly);
       const scanStale = !state.signals.length || now - (state.lastScanAt || 0) >= state.cfg.scanStaleMs;
       const willScan = forceScan || scanStale;
-      if (!state.running && !state.positions.length && !willScan && !onlyScan) {
+      if (!state.running && !state.positions.length && !willScan && !onlyScan && !scanPending) {
         return { skipped: true, reason: 'paper-stopped' };
       }
 
       const positionUpdate = applyPositionUpdateStatus(
         state,
-        await updatePositions(state, { markToMarket: !willScan }),
+        // A partial scan can be retried later; a crossed stop cannot wait for it.
+        await updatePositions(state, { markToMarket: scanPending || !willScan }),
       );
+      if (scanPending) {
+        await this.saveStoredState(state);
+        const retryDelay = scanRetryDelayMs(state.scanPlan);
+        await this.scheduleScanContinuation(retryDelay);
+        return pendingScanResponse(state, retryDelay);
+      }
       if (willScan) {
         let plan = await createScanPlan(state);
         assertCompleteScanUniverse(state, plan);
         plan.onlyScan = onlyScan;
-        plan = await advanceScanPlan(state, plan);
+        try {
+          plan = await advanceScanPlan(state, plan);
+        } catch (error) {
+          const deferred = await this.deferRateLimitedScan(state, plan, error);
+          if (deferred) return deferred;
+          throw error;
+        }
         if (plan.cursor < plan.tickers.length) return this.savePendingScan(state, plan);
         return this.completeScan(state, plan);
       }
@@ -639,6 +658,42 @@ function hasActiveScanPlan(state) {
   return Boolean(plan && Array.isArray(plan.tickers) && Number(plan.cursor || 0) < plan.tickers.length);
 }
 
+function gateRateLimitBackoffMs(retryCount) {
+  const attempt = Math.max(1, Math.floor(Number(retryCount) || 1));
+  return Math.min(
+    GATE_RATE_LIMIT_BACKOFF_MAX_MS,
+    GATE_RATE_LIMIT_BACKOFF_BASE_MS * (2 ** (attempt - 1)),
+  );
+}
+
+function withGateRateLimitRetry(plan, now = Date.now()) {
+  const retryCount = Math.max(0, Number(plan?.retryCount || 0)) + 1;
+  return {
+    ...plan,
+    retryCount,
+    nextRetryAt: now + gateRateLimitBackoffMs(retryCount),
+  };
+}
+
+function scanRetryDelayMs(plan, now = Date.now()) {
+  const retryAt = Number(plan?.nextRetryAt || 0);
+  return retryAt > now ? retryAt - now : SCAN_CONTINUATION_DELAY_MS;
+}
+
+function pendingScanResponse(state, retryInMs = 0) {
+  const plan = state.scanPlan || {};
+  return {
+    ok: true,
+    scanPending: true,
+    stateVersion: state.stateVersion,
+    scannedCount: Number(plan.cursor || 0),
+    plannedScanCount: Array.isArray(plan.tickers) ? plan.tickers.length : 0,
+    openPositions: state.positions.length,
+    retryAt: Number(plan.nextRetryAt || 0),
+    retryInMs: Math.max(0, Math.ceil(Number(retryInMs || 0))),
+  };
+}
+
 function normalizeScanPlan(plan) {
   if (!plan || typeof plan !== 'object' || !Array.isArray(plan.tickers)) return null;
   const maxTickers = DEFAULT_CFG.maxKlineScans;
@@ -662,6 +717,8 @@ function normalizeScanPlan(plan) {
     failedSymbols: Array.isArray(plan.failedSymbols) ? plan.failedSymbols.slice(0, 8) : [],
     failedReasonCounts: plan.failedReasonCounts && typeof plan.failedReasonCounts === 'object' ? plan.failedReasonCounts : {},
     okxRateLimitUntil: Math.max(0, Number(plan.okxRateLimitUntil || 0)),
+    retryCount: Math.max(0, Number(plan.retryCount || 0)),
+    nextRetryAt: Math.max(0, Number(plan.nextRetryAt || 0)),
     rebuiltForOkxRateLimit: Boolean(plan.rebuiltForOkxRateLimit),
     onlyScan: Boolean(plan.onlyScan),
   };
@@ -791,6 +848,8 @@ async function advanceScanPlan(state, plan) {
       .join(', ');
     throw new Error(`Scan batch failed: ${reasons || 'unknown'}`);
   }
+  next.retryCount = 0;
+  next.nextRetryAt = 0;
   next.onlyScan = Boolean(plan.onlyScan);
   next.rebuiltForOkxRateLimit = Boolean(plan.rebuiltForOkxRateLimit);
   return next;
@@ -1737,7 +1796,7 @@ async function hyperliquidInfo(body, attempt = 0, maxRetries = 2) {
 
 function scanFailureReason(error) {
   const message = String(error?.message || error || '');
-  if (message.includes('Gate') && message.includes('429')) return 'gate_rate_limit';
+  if ((message.includes('Gate') && message.includes('429')) || message.includes('gate_rate_limit')) return 'gate_rate_limit';
   if (message.includes('OKX') && (message.includes('429') || message.includes('50011'))) return 'okx_rate_limit';
   if (message.includes('XYZ')) return 'xyz_api_error';
   if (message.includes('Too many subrequests')) return 'worker_subrequest_limit';
