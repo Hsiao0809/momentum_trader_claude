@@ -44,8 +44,10 @@ assert.match(worker, /this\.enqueue\(\(\) => this\.runTick\(options\)\)/);
 assert.match(worker, /paper-coordinator\/control\$\{url\.pathname\}/);
 assert.match(worker, /STATE_CHUNK_BYTES = 1_500_000/);
 assert.match(worker, /SCAN_CONTINUATION_DELAY_MS = 1_000/);
+assert.match(worker, /GATE_RATE_LIMIT_BACKOFF_BASE_MS = 30_000/);
+assert.match(worker, /GATE_RATE_LIMIT_BACKOFF_MAX_MS = 10 \* 60 \* 1000/);
 assert.match(worker, /this\.ctx\.storage\.transaction/);
-assert.match(worker, /this\.ctx\.storage\.setAlarm\(Date\.now\(\) \+ SCAN_CONTINUATION_DELAY_MS\)/);
+assert.match(worker, /this\.ctx\.storage\.setAlarm\(Date\.now\(\) \+ delay\)/);
 assert.match(worker, /async alarm\(\)/);
 assert.doesNotMatch(worker, /while \(plan\.cursor < plan\.tickers\.length\)/);
 assert.match(worker, /Paper state chunk length mismatch/);
@@ -78,6 +80,8 @@ const runTick = Function(
   'hasActiveScanPlan',
   'applyPositionUpdateStatus',
   'updatePositions',
+  'scanRetryDelayMs',
+  'pendingScanResponse',
   runTickSource.replace('async runTick(options = {}) {', 'async function runTick(options = {}) {') + '; return runTick;',
 )(
   () => {},
@@ -92,6 +96,15 @@ const runTick = Function(
     pendingScanOrder.push('updatePositions');
     return { historyGaps: [] };
   },
+  () => 1_000,
+  (state) => ({
+    ok: true,
+    scanPending: true,
+    stateVersion: state.stateVersion,
+    scannedCount: state.scanPlan.cursor,
+    plannedScanCount: state.scanPlan.tickers.length,
+    openPositions: state.positions.length,
+  }),
 );
 const pendingScanOrder = [];
 const pendingScanState = {
@@ -113,6 +126,84 @@ assert.deepEqual(
   ['updatePositions', 'save', 'schedule'],
   'a pending scan must update stops before saving and scheduling its continuation',
 );
+
+const gateRateLimitBackoffSource = extractFunction(worker, 'gateRateLimitBackoffMs');
+const gateRateLimitBackoffMs = Function(
+  'GATE_RATE_LIMIT_BACKOFF_BASE_MS',
+  'GATE_RATE_LIMIT_BACKOFF_MAX_MS',
+  `${gateRateLimitBackoffSource}; return gateRateLimitBackoffMs;`,
+)(30_000, 600_000);
+assert.equal(gateRateLimitBackoffMs(1), 30_000);
+assert.equal(gateRateLimitBackoffMs(2), 60_000);
+assert.equal(gateRateLimitBackoffMs(8), 600_000, 'Gate backoff must cap at ten minutes');
+
+const withGateRateLimitRetrySource = extractFunction(worker, 'withGateRateLimitRetry');
+const withGateRateLimitRetry = Function(
+  'gateRateLimitBackoffMs',
+  `${withGateRateLimitRetrySource}; return withGateRateLimitRetry;`,
+)(gateRateLimitBackoffMs);
+const retryStartedAt = 1_000_000;
+const rateLimitedPlan = withGateRateLimitRetry({ cursor: 14, tickers: Array(16).fill({}) }, retryStartedAt);
+assert.equal(rateLimitedPlan.retryCount, 1);
+assert.equal(rateLimitedPlan.nextRetryAt, retryStartedAt + 30_000);
+
+const scanRetryDelaySource = extractFunction(worker, 'scanRetryDelayMs');
+const scanRetryDelayMs = Function(
+  'SCAN_CONTINUATION_DELAY_MS',
+  `${scanRetryDelaySource}; return scanRetryDelayMs;`,
+)(1_000);
+assert.equal(scanRetryDelayMs(rateLimitedPlan, retryStartedAt), 30_000);
+assert.equal(scanRetryDelayMs(rateLimitedPlan, rateLimitedPlan.nextRetryAt), 1_000);
+
+const scanFailureReasonSource = extractFunction(worker, 'scanFailureReason');
+const scanFailureReason = Function(`${scanFailureReasonSource}; return scanFailureReason;`)();
+assert.equal(scanFailureReason(new Error('Scan batch failed: gate_rate_limit:2')), 'gate_rate_limit');
+
+const continueScanSource = extractMethod(worker, 'async continueScan() {');
+const continueScan = Function(
+  'hasActiveScanPlan',
+  'scanRetryDelayMs',
+  'pendingScanResponse',
+  'advanceScanPlan',
+  continueScanSource.replace('async continueScan() {', 'async function continueScan() {') + '; return continueScan;',
+)(
+  (state) => Boolean(state.scanPlan),
+  scanRetryDelayMs,
+  (state, retryInMs) => ({ scanPending: true, retryInMs, cursor: state.scanPlan.cursor }),
+  async () => { throw new Error('scan must not run before the retry window ends'); },
+);
+const retryUntil = Date.now() + 45_000;
+const waitingState = { scanPlan: { cursor: 14, tickers: Array(16).fill({}), nextRetryAt: retryUntil } };
+let scheduledDelay = 0;
+const waitingResult = await continueScan.call({
+  storedState: async () => waitingState,
+  scheduleScanContinuation: async (delay) => { scheduledDelay = delay; },
+},);
+assert.equal(waitingResult.scanPending, true);
+assert.ok(scheduledDelay >= 44_000 && scheduledDelay <= 45_000, 'pending Gate retries must wait instead of retrying immediately');
+
+const deferRateLimitedScanSource = extractMethod(worker, 'async deferRateLimitedScan(state, plan, error) {');
+const deferRateLimitedScan = Function(
+  'scanFailureReason',
+  'withGateRateLimitRetry',
+  'scanRetryDelayMs',
+  'pendingScanResponse',
+  deferRateLimitedScanSource.replace('async deferRateLimitedScan(state, plan, error) {', 'async function deferRateLimitedScan(state, plan, error) {') + '; return deferRateLimitedScan;',
+)(
+  scanFailureReason,
+  withGateRateLimitRetry,
+  scanRetryDelayMs,
+  (state, retryInMs) => ({ scanPending: true, retryInMs, retryAt: state.scanPlan.nextRetryAt }),
+);
+const deferredState = { positions: [], stateVersion: 1 };
+let deferredDelay = 0;
+const deferredResult = await deferRateLimitedScan.call({
+  saveStoredState: async () => {},
+  scheduleScanContinuation: async (delay) => { deferredDelay = delay; },
+}, deferredState, { cursor: 14, tickers: Array(16).fill({}) }, new Error('Scan batch failed: gate_rate_limit:2'));
+assert.equal(deferredResult.scanPending, true);
+assert.equal(deferredState.scanPlan.retryCount, 1);
+assert.ok(deferredDelay >= 29_000 && deferredDelay <= 30_000, 'Gate rate limits must schedule a delayed retry');
 
 const fillCryptoScanBudgetSource = extractFunction(worker, 'fillCryptoScanBudget');
 const fillCryptoScanBudget = Function(
