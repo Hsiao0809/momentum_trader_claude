@@ -22,6 +22,8 @@ const COMPLETE_SCAN_BATCH_SIZE = 2;
 const SCAN_CONTINUATION_DELAY_MS = 1_000;
 const GATE_RATE_LIMIT_BACKOFF_BASE_MS = 30_000;
 const GATE_RATE_LIMIT_BACKOFF_MAX_MS = 10 * 60 * 1000;
+const GATE_RATE_LIMIT_MAX_RETRIES = 3;
+const GATE_RATE_LIMIT_COOLDOWN_MS = 10 * 60 * 1000;
 const OKX_RATE_LIMIT_COOLDOWN_MS = 10 * 60 * 1000;
 const OKX_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
 
@@ -296,6 +298,9 @@ export class PaperCoordinator extends DurableObject {
       const symbols = positionUpdate.historyGaps.map((gap) => gap.symbol).join(', ');
       state.lastError = `position_history_gap: ${symbols}; new entries paused until candle history is continuous`;
       state.lastErrorAt = Date.now();
+    } else if (Number(plan.skippedScanCount || 0) > 0) {
+      state.lastError = `scan_degraded: Gate rate-limited; skipped ${plan.skippedScanCount} Gate instruments until ${new Date(Number(plan.gateRateLimitUntil || 0)).toISOString()}`;
+      state.lastErrorAt = Date.now();
     } else {
       state.lastError = null;
     }
@@ -313,6 +318,13 @@ export class PaperCoordinator extends DurableObject {
   async continueScan() {
     const state = await this.storedState();
     if (!hasActiveScanPlan(state)) return { ok: true, skipped: true, reason: 'no-active-scan' };
+    if (scanPlanExpired(state.scanPlan, state.cfg)) {
+      state.scanPlan = null;
+      state.lastError = 'Scan plan expired before publication; restarting from a fresh universe';
+      state.lastErrorAt = Date.now();
+      await this.saveStoredState(state);
+      return this.runTick({ forceScan: true, reason: 'expired-scan-recovery' });
+    }
     const nextRetryAt = Number(state.scanPlan.nextRetryAt || 0);
     const retryDelay = scanRetryDelayMs(state.scanPlan);
     if (nextRetryAt > Date.now()) {
@@ -363,7 +375,13 @@ export class PaperCoordinator extends DurableObject {
       recoverLastFailedNotification(state);
       if (await flushPendingNotifications(state, this.env)) await this.saveStoredState(state);
 
-      const scanPending = hasActiveScanPlan(state);
+      let scanPending = hasActiveScanPlan(state);
+      if (scanPending && scanPlanExpired(state.scanPlan, state.cfg, now)) {
+        state.scanPlan = null;
+        state.lastError = 'Scan plan expired before publication; restarting from a fresh universe';
+        state.lastErrorAt = now;
+        scanPending = false;
+      }
       const forceScan = Boolean(options.forceScan || state.forceScanRequested);
       const onlyScan = Boolean(options.onlyScan || state.manualScanOnly);
       const scanStale = !state.signals.length || now - (state.lastScanAt || 0) >= state.cfg.scanStaleMs;
@@ -590,6 +608,7 @@ function defaultState() {
     lastScanAt: 0,
     lastCoreScanAt: 0,
     okxRateLimitUntil: 0,
+    gateRateLimitUntil: 0,
     scanCursor: 0,
     xyzScanCursor: 0,
     scanPlan: null,
@@ -639,6 +658,7 @@ function normalizeState(state) {
     notificationLog: Array.isArray(state.notificationLog) ? state.notificationLog.slice(0, 100) : [],
     pendingNotifications: Array.isArray(state.pendingNotifications) ? state.pendingNotifications.slice(0, 20) : [],
     positionHistoryGaps: Array.isArray(state.positionHistoryGaps) ? state.positionHistoryGaps : [],
+    gateRateLimitUntil: Math.max(0, Number(state.gateRateLimitUntil || 0)),
     scanPlan: normalizeScanPlan(state.scanPlan),
   };
   normalizeStrategyLabels(normalized.signals);
@@ -680,6 +700,10 @@ function scanRetryDelayMs(plan, now = Date.now()) {
   return retryAt > now ? retryAt - now : SCAN_CONTINUATION_DELAY_MS;
 }
 
+function scanPlanExpired(plan, cfg, now = Date.now()) {
+  return Boolean(plan) && now - Number(plan.createdAt || 0) > Number(cfg?.scanStaleMs || DEFAULT_CFG.scanStaleMs);
+}
+
 function pendingScanResponse(state, retryInMs = 0) {
   const plan = state.scanPlan || {};
   return {
@@ -715,10 +739,13 @@ function normalizeScanPlan(plan) {
     successfulScanCount: Math.max(0, Number(plan.successfulScanCount || 0)),
     failedScanCount: Math.max(0, Number(plan.failedScanCount || 0)),
     failedSymbols: Array.isArray(plan.failedSymbols) ? plan.failedSymbols.slice(0, 8) : [],
+    skippedSymbols: Array.isArray(plan.skippedSymbols) ? plan.skippedSymbols.slice(0, 8) : [],
     failedReasonCounts: plan.failedReasonCounts && typeof plan.failedReasonCounts === 'object' ? plan.failedReasonCounts : {},
     okxRateLimitUntil: Math.max(0, Number(plan.okxRateLimitUntil || 0)),
+    gateRateLimitUntil: Math.max(0, Number(plan.gateRateLimitUntil || 0)),
     retryCount: Math.max(0, Number(plan.retryCount || 0)),
     nextRetryAt: Math.max(0, Number(plan.nextRetryAt || 0)),
+    skippedScanCount: Math.max(0, Number(plan.skippedScanCount || 0)),
     rebuiltForOkxRateLimit: Boolean(plan.rebuiltForOkxRateLimit),
     onlyScan: Boolean(plan.onlyScan),
   };
@@ -817,8 +844,10 @@ async function createScanPlan(state, rankedResult = null) {
     successfulScanCount: 0,
     failedScanCount: 0,
     failedSymbols: [],
+    skippedSymbols: [],
     failedReasonCounts: {},
     okxRateLimitUntil: Number(state.okxRateLimitUntil || 0),
+    gateRateLimitUntil: Number(state.gateRateLimitUntil || 0),
   };
 }
 
@@ -843,6 +872,22 @@ async function advanceScanPlan(state, plan) {
     return rebuilt;
   }
   if (Number(next.failedScanCount || 0) > previousFailedCount) {
+    const newFailureReasons = Object.entries(next.failedReasonCounts || {})
+      .filter(([reason, count]) => Number(count || 0) > Number(plan.failedReasonCounts?.[reason] || 0))
+      .map(([reason]) => reason);
+    const newFailedCount = Number(next.failedScanCount || 0) - previousFailedCount;
+    const onlyGateRateLimits = newFailureReasons.length > 0
+      && newFailureReasons.every((reason) => reason === 'gate_rate_limit');
+    if (onlyGateRateLimits && Number(plan.retryCount || 0) >= GATE_RATE_LIMIT_MAX_RETRIES) {
+      state.gateRateLimitUntil = Date.now() + GATE_RATE_LIMIT_COOLDOWN_MS;
+      next.skippedScanCount = Math.max(0, Number(plan.skippedScanCount || 0)) + newFailedCount;
+      next.gateRateLimitUntil = state.gateRateLimitUntil;
+      next.retryCount = 0;
+      next.nextRetryAt = 0;
+      next.onlyScan = Boolean(plan.onlyScan);
+      next.rebuiltForOkxRateLimit = Boolean(plan.rebuiltForOkxRateLimit);
+      return next;
+    }
     const reasons = Object.entries(next.failedReasonCounts || {})
       .map(([reason, count]) => `${reason}:${count}`)
       .join(', ');
@@ -877,10 +922,16 @@ async function scanSignalPlanBatch(plan, cfg, batchSize, failOnError = true) {
     ...plan,
     signals: [...(plan.signals || [])],
     failedSymbols: [...(plan.failedSymbols || [])],
+    skippedSymbols: [...(plan.skippedSymbols || [])],
     failedReasonCounts: { ...(plan.failedReasonCounts || {}) },
   };
   const batch = plan.tickers.slice(plan.cursor, plan.cursor + batchSize);
   for (const ticker of batch) {
+    if (ticker.marketProvider === 'gate' && Number(plan.gateRateLimitUntil || 0) > Date.now()) {
+      next.skippedScanCount = Math.max(0, Number(next.skippedScanCount || 0)) + 1;
+      if (next.skippedSymbols.length < 8) next.skippedSymbols.push(ticker.symbol);
+      continue;
+    }
     try {
       const rows = await marketKlines(ticker.marketProvider, ticker.instId, '15m', 130);
       const sig = evaluateSignal(
@@ -930,7 +981,8 @@ function finalizeScanPlan(state, plan) {
   if (plan.tickers.length !== requiredCount) {
     throw new Error(`Incomplete scan universe: ${plan.tickers.length}/${requiredCount}`);
   }
-  if (plan.cursor < plan.tickers.length || plan.successfulScanCount < plan.tickers.length) {
+  const skippedScanCount = Math.max(0, Number(plan.skippedScanCount || 0));
+  if (plan.cursor < plan.tickers.length || plan.successfulScanCount + skippedScanCount < plan.tickers.length) {
     throw new Error(`Incomplete scan plan: ${plan.successfulScanCount}/${plan.tickers.length}`);
   }
   if (Date.now() - Number(plan.createdAt || 0) > state.cfg.scanStaleMs) {
@@ -943,8 +995,11 @@ function finalizeScanPlan(state, plan) {
     providerMeta: {
       ...(plan.meta.providerMeta || {}),
       okxScanned: scannedTickers.filter((ticker) => ticker.marketProvider === 'okx').length,
-      gateScanned: scannedTickers.filter((ticker) => ticker.marketProvider === 'gate').length,
+      gateScanned: Math.max(0, scannedTickers.filter((ticker) => ticker.marketProvider === 'gate').length - skippedScanCount),
+      gateSkipped: skippedScanCount,
       xyzScanned: scannedTickers.filter((ticker) => ticker.marketProvider === 'xyz').length,
+      gateCoolingDown: Number(plan.gateRateLimitUntil || 0) > Date.now(),
+      gateRateLimitUntil: Number(plan.gateRateLimitUntil || 0),
     },
     scannedAt: Date.now(),
     scannedCount: plan.cursor,
@@ -953,6 +1008,8 @@ function finalizeScanPlan(state, plan) {
     successfulScanCount: plan.successfulScanCount,
     failedScanCount: plan.failedScanCount,
     failedSymbols: plan.failedSymbols,
+    skippedScanCount,
+    skippedSymbols: plan.skippedSymbols,
     failedReasonCounts: plan.failedReasonCounts,
     btcContextOk: plan.btcContextOk,
     scanComplete: true,
@@ -964,6 +1021,7 @@ function finalizeScanPlan(state, plan) {
   state.recentSignals = mergeRecentSignals(state.recentSignals, signals, state.lastScanAt);
   state.scanCursor = plan.meta.nextCursor;
   state.okxRateLimitUntil = Number(plan.okxRateLimitUntil || 0);
+  state.gateRateLimitUntil = Number(plan.gateRateLimitUntil || 0);
   state.scanPlan = null;
   return signals;
 }
@@ -1273,6 +1331,8 @@ async function scanUniverse(state, rankedResult = null) {
     const result = rankedResult || await rankedInstruments(cfg, {
       skipOkx: Date.now() < Number(state.okxRateLimitUntil || 0),
       okxRateLimitUntil: Number(state.okxRateLimitUntil || 0),
+      skipGate: Date.now() < Number(state.gateRateLimitUntil || 0),
+      gateRateLimitUntil: Number(state.gateRateLimitUntil || 0),
     });
     ranked = result.ranked;
     providerMeta = result.providerMeta;
@@ -1402,9 +1462,10 @@ function fillCryptoScanBudget(primary, ranked, budget) {
 
 async function rankedInstruments(cfg, options = {}) {
   const okxCoolingDown = Boolean(options.skipOkx);
+  const gateCoolingDown = Boolean(options.skipGate);
   const [okxResult, gateResult, xyzResult] = await Promise.allSettled([
     okxCoolingDown ? Promise.resolve([]) : okx('/api/v5/market/tickers', { instType: 'SWAP' }),
-    gate('/api/v4/futures/usdt/tickers', {}, 0, 1),
+    gateCoolingDown ? Promise.resolve([]) : gate('/api/v4/futures/usdt/tickers', {}, 0, 1),
     hyperliquidInfo({ type: 'metaAndAssetCtxs', dex: 'xyz' }, 0, 1),
   ]);
   if (okxResult.status === 'rejected' && gateResult.status === 'rejected' && xyzResult.status === 'rejected') {
@@ -1467,7 +1528,11 @@ async function rankedInstruments(cfg, options = {}) {
         : okxResult.status === 'rejected' ? String(okxResult.reason) : null,
       okxCoolingDown,
       okxRateLimitUntil: okxCoolingDown ? Number(options.okxRateLimitUntil || 0) : 0,
-      gateError: gateResult.status === 'rejected' ? String(gateResult.reason) : null,
+      gateError: gateCoolingDown
+        ? `Gate cooling down until ${new Date(Number(options.gateRateLimitUntil || 0)).toISOString()}`
+        : gateResult.status === 'rejected' ? String(gateResult.reason) : null,
+      gateCoolingDown,
+      gateRateLimitUntil: gateCoolingDown ? Number(options.gateRateLimitUntil || 0) : 0,
       xyzError: xyzResult.status === 'rejected' ? String(xyzResult.reason) : null,
     },
   };
