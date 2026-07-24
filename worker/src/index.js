@@ -66,10 +66,11 @@ const DEFAULT_CFG = {
   // strong_momentum_breakout 進場確認：>0 → 突破需前一根也成立才進(早進版，取代 1h≥4 追價擋單)；=0 → 恢復原 1h≥4 擋單。
   // ⚠️ 早進版實盤重放總分較高但屬雜訊尖峰(1 根時序翻轉、PUMP 仍滿停損)，非回測驗證，上線觀察用；不理想設回 0 即恢復原行為。
   smbConfirmBars: 1,
-  // smbChaseHot：true → strong_momentum_breakout 突破一成立就進、追 1h≥6 的垂直噴出（跳過 ≥6 拒絕與 smbConfirmBars 確認）；false(預設) → 現況。
-  // ⚠️ 實盤重放此版 +14.3R vs 現況 +6.1（抗滑點到 ~2%，break-even ~3%），但進場點正是小幣滑點最兇處、解除全策略 ≥6 安全帶、harness 盲區。
-  // 非回測驗證，預設關；部署後手動開來實盤觀察真實成交價差，不理想設回 false。
-  smbChaseHot: false,
+  // smbChaseHot：true → strong_momentum_breakout 突破一成立就進、追 1h≥6 的垂直噴出（跳過 ≥6 拒絕與 smbConfirmBars 確認）。
+  // ⚠️ 實盤重放此版 +14.3R vs 等冷卻 +6.1（抗滑點到 ~2%，break-even ~3%），但進場點正是小幣滑點最兇處、解除全策略 ≥6 安全帶、harness 盲區、非回測驗證。
+  // 預設開（使用者決定，因已有 dashboard 開關可隨時關）；緊盯實盤成交價 vs 訊號 K 收盤的價差＝真實滑點，不理想用開關設回 false。
+  // 注意：已部署的 runner state.cfg 若已存 false，改此預設不會生效——需用 dashboard 開關或 POST /control/config {smbChaseHot:true} 覆蓋。
+  smbChaseHot: true,
   symbolStopCooldownMs: 24 * 60 * 60 * 1000,
   scanLimit: 35,
   maxKlineScans: 16,
@@ -818,6 +819,11 @@ function applyConfig(state, body = {}) {
     state.riskPerTrade = value;
     state.cfg.riskPerTrade = value;
   }
+  // 策略開關（可透過 dashboard 即時切換，下一 tick 生效）
+  if (typeof body.smbChaseHot === 'boolean') state.cfg.smbChaseHot = body.smbChaseHot;
+  if (Number.isFinite(Number(body.smbConfirmBars))) state.cfg.smbConfirmBars = Math.max(0, Math.round(Number(body.smbConfirmBars)));
+  if (Number.isFinite(Number(body.momentumStallBars))) state.cfg.momentumStallBars = clamp(Math.round(Number(body.momentumStallBars)), 3, 48);
+  if (Number.isFinite(Number(body.momentumMinAtr))) state.cfg.momentumMinAtr = clamp(Number(body.momentumMinAtr), 0, 10);
 }
 
 async function createScanPlan(state, rankedResult = null) {
