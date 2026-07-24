@@ -77,6 +77,9 @@
     main.pnl-page{display:block}
     main.pnl-page .trading-page{display:none!important}
     main.pnl-page #pnlSection{display:flex}
+    main.history-page{display:block}
+    main.history-page .trading-page{display:none!important}
+    main.history-page #historySection{display:flex}
     #reviewSection{min-height:220px;overflow:visible}
     #reviewSection .cols2{overflow:visible;min-height:0}
     #reviewSection .table-wrap{min-height:100px;max-height:220px}
@@ -123,6 +126,11 @@
     .trade-log-section th,.trade-log-section td{padding-top:0;padding-bottom:0}
     .status-box{white-space:pre-wrap;color:var(--muted);font-size:11px;line-height:1.4;overflow:auto;margin-top:6px;max-height:42px;flex:0 0 auto;font-family:"SF Mono","JetBrains Mono",ui-monospace,Menlo,Consolas,monospace}
     #pnlSection{display:none;min-height:370px;overflow:hidden}
+    #historySection{display:none;min-height:370px;overflow:hidden}
+    #historySection .table-wrap{max-height:none;flex:1 1 auto}
+    .history-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    .history-toolbar input[type=text]{width:150px}
+    .history-toolbar select{height:28px}
     #pnlSection.calendar-mode{min-height:510px}
     .pnl-heading{min-width:0}
     .pnl-heading .summary{max-width:100%;margin-top:4px}
@@ -205,6 +213,7 @@
   <nav class="dashboard-tabs" aria-label="儀表板分頁">
     <button type="button" class="dashboard-tab active" data-dashboard-page="overview" aria-pressed="true" onclick="setDashboardPage('overview')">交易總覽</button>
     <button type="button" class="dashboard-tab" data-dashboard-page="pnl" aria-pressed="false" onclick="setDashboardPage('pnl')">盈虧分析</button>
+    <button type="button" class="dashboard-tab" data-dashboard-page="history" aria-pressed="false" onclick="setDashboardPage('history')">歷史訊號</button>
   </nav>
 </header>
 
@@ -432,6 +441,26 @@
       </div>
     </div>
   </section>
+
+  <section id="historySection">
+    <div class="section-head history-toolbar">
+      <h2>歷史訊號</h2>
+      <div id="historySummary" class="summary">尚無紀錄</div>
+      <span style="flex:1 1 auto"></span>
+      <input id="historyFilter" type="text" placeholder="搜尋 Symbol" oninput="paintHistory()">
+      <select id="historyStrategyFilter" onchange="paintHistory()"><option value="">全部策略</option></select>
+      <button class="ghost" onclick="downloadHistory()">CSV</button>
+      <button class="danger" onclick="clearSignalHistory()">清除歷史</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>偵測時間</th><th class="sym">Symbol</th><th>Score</th><th class="left">Strategy</th><th>多空</th><th>Entry</th><th>1H%</th><th>4H%</th><th>24H%</th><th>24H pos</th><th>Vol x</th><th class="left">Reasons</th>
+        </tr></thead>
+        <tbody id="historyBody"></tbody>
+      </table>
+    </div>
+  </section>
 </main>
 
 <script>
@@ -441,6 +470,10 @@ const SERVER_MODE = Boolean(PAPER_API);
 const INTERVAL_MS = { '15m': 900000 };
 const RECENT_SIGNAL_TTL_MS = 30 * 60 * 1000;
 const RECENT_SIGNAL_LIMIT = 50;
+// 歷史訊號：純瀏覽器端留存，worker 不參與（不影響 runner）。每次輪詢 snapshot 順手累積，保留 7 天。
+const SIGNAL_HISTORY_KEY = 'momentumSignalHistory';
+const SIGNAL_HISTORY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const SIGNAL_HISTORY_LIMIT = 4000;
 const LIVE_REFRESH_MS = 30000;
 const RUNNER_STALE_MS = 10 * 60 * 1000;
 const SCAN_STALE_WARN_MS = 20 * 60 * 1000;
@@ -503,7 +536,7 @@ let pnlView = 'calendar';
 let pnlCalendarMonth = '';
 let pnlChartPoints = [];
 let pnlResizeTimer = null;
-let dashboardPage = localStorage.getItem('momentumDashboardPage') === 'pnl' ? 'pnl' : 'overview';
+let dashboardPage = ['pnl', 'history'].includes(localStorage.getItem('momentumDashboardPage')) ? localStorage.getItem('momentumDashboardPage') : 'overview';
 
 function nowMs(){ return Date.now(); }
 function tw(ms){
@@ -804,6 +837,7 @@ async function syncServerState(showStatus=false){
 function applyServerState(nextState){
   maybeShowBrowserNotification(nextState);
   state = nextState;
+  recordSignalHistory(nextState);
   applyLatestPrices();
   localStorage.setItem('lanaaiMomentumClaude', JSON.stringify(state));
   if(typeof state.initialEquity === 'number') CFG.initialEquity = state.initialEquity;
@@ -2200,13 +2234,14 @@ function buildPnlModel(days=pnlRangeDays){
   };
 }
 function setDashboardPage(page, resetScroll=true){
-  const nextPage = page === 'pnl' ? 'pnl' : 'overview';
+  const nextPage = ['pnl', 'history'].includes(page) ? page : 'overview';
   const enteringPnl = nextPage === 'pnl' && dashboardPage !== 'pnl';
   dashboardPage = nextPage;
   if(enteringPnl) pnlView = 'calendar';
   localStorage.setItem('momentumDashboardPage', dashboardPage);
   const main = document.querySelector('main');
   main.classList.toggle('pnl-page', dashboardPage === 'pnl');
+  main.classList.toggle('history-page', dashboardPage === 'history');
   document.querySelectorAll('[data-dashboard-page]').forEach(button => {
     const active = button.dataset.dashboardPage === dashboardPage;
     button.classList.toggle('active', active);
@@ -2215,6 +2250,7 @@ function setDashboardPage(page, resetScroll=true){
   if(resetScroll) main.scrollTop = 0;
   if(resetScroll) toggleSettingsDrawer(false);
   if(dashboardPage === 'pnl') requestAnimationFrame(paintPnl);
+  if(dashboardPage === 'history') paintHistory();
 }
 function setPnlRange(days){
   pnlRangeDays = [7, 30, 60].includes(Number(days)) ? Number(days) : 7;
@@ -2643,6 +2679,7 @@ function paintAll(){
   }).join('') : `<tr><td class="sym muted" colspan="14">${state.trades.length ? 'No matching trades' : 'No closed paper trade'}</td></tr>`;
   paintPnl();
   paintReview();
+  paintHistory();
 
   drawSpark();
   updateStatusLine(state.running ? `Paper running · ${state.positions.length} open · ${tw(nowMs())}` : `Paper stopped · ${tw(nowMs())}`);
@@ -2680,6 +2717,90 @@ function paintReview(){
   document.getElementById('reviewSummary').textContent = `勝率 ${showPct(wins/trades.length*100)} · 平均持倉 ${fmt(avgHold,1)}h`;
 }
 
+// ── 歷史訊號（純瀏覽器端，不觸及 worker / runner）────────────────────────────
+function loadSignalHistory(){
+  try {
+    const raw = JSON.parse(localStorage.getItem(SIGNAL_HISTORY_KEY) || '[]');
+    if(!Array.isArray(raw)) return [];
+    const cutoff = nowMs() - SIGNAL_HISTORY_TTL_MS;
+    return raw.filter(e => Number(e.seenAt || 0) >= cutoff);
+  } catch(e){ return []; }
+}
+function saveSignalHistory(list){
+  try { localStorage.setItem(SIGNAL_HISTORY_KEY, JSON.stringify(list.slice(-SIGNAL_HISTORY_LIMIT))); }
+  catch(e){ console.warn('saveSignalHistory', e); }
+}
+// 每次輪詢 snapshot 時把本輪掃描到的訊號累積起來，以 instId+掃描時刻 去重（同一輪多次輪詢只記一次，不同輪＝時間軸上的新點）
+function recordSignalHistory(snap){
+  const signals = (snap && Array.isArray(snap.signals)) ? snap.signals : [];
+  if(!signals.length) return;
+  const scanAt = Number(snap.lastScanAt) || nowMs();
+  const list = loadSignalHistory();
+  const seen = new Set(list.map(e => e.key));
+  let added = 0;
+  for(const s of signals){
+    const t = Number(s.scannedAt) || scanAt;
+    const key = `${s.instId || s.symbol}|${t}`;
+    if(seen.has(key)) continue;
+    seen.add(key);
+    const m = s.metrics || {};
+    list.push({
+      key, seenAt:t, symbol:s.symbol, instId:s.instId, marketProvider:s.marketProvider,
+      strategyKey:s.strategyKey, score:s.score, side:s.side || sideForStrategy(s.strategyKey), entry:s.entry,
+      m1h:m.momentum1h, m4h:m.momentum4h, m24h:m.momentum24h, pos24h:m.position24h, vol:m.volumeRatio,
+      reasons:(s.reasons || []).slice(0,4).join(' · '),
+    });
+    added++;
+  }
+  if(added){
+    list.sort((a,b) => Number(a.seenAt) - Number(b.seenAt));
+    saveSignalHistory(list);
+    if(dashboardPage === 'history') paintHistory();
+  }
+}
+function clearSignalHistory(){
+  if(!confirm('清除所有本機歷史訊號紀錄？此操作只影響這個瀏覽器，不影響 runner。')) return;
+  try { localStorage.removeItem(SIGNAL_HISTORY_KEY); } catch(e){}
+  paintHistory();
+}
+function downloadHistory(){
+  const rows = loadSignalHistory().slice().sort((a,b) => Number(b.seenAt) - Number(a.seenAt))
+    .map(e => ({ time:twFull(e.seenAt), symbol:e.symbol, strategy:e.strategyKey, score:e.score, side:e.side, entry:e.entry, m1h:e.m1h, m4h:e.m4h, m24h:e.m24h, pos24h:e.pos24h, vol:e.vol, reasons:e.reasons }));
+  downloadCsv('signal_history_7d.csv', rows);
+}
+function paintHistory(){
+  const body = document.getElementById('historyBody');
+  if(!body) return;
+  const list = loadSignalHistory();
+  const stratSel = document.getElementById('historyStrategyFilter');
+  if(stratSel){
+    const strategies = [...new Set(list.map(e => e.strategyKey).filter(Boolean))].sort();
+    if(stratSel.dataset.sig !== strategies.join(',')){
+      const cur = stratSel.value;
+      stratSel.innerHTML = ['<option value="">全部策略</option>', ...strategies.map(k => `<option value="${htmlEscape(k)}">${htmlEscape(strategyName({strategyKey:k}) || k)}</option>`)].join('');
+      stratSel.value = strategies.includes(cur) ? cur : '';
+      stratSel.dataset.sig = strategies.join(',');
+    }
+  }
+  const q = (document.getElementById('historyFilter')?.value || '').trim().toUpperCase();
+  const stratFilter = stratSel?.value || '';
+  const filtered = list.filter(e =>
+    (!q || (e.symbol || '').toUpperCase().includes(q)) &&
+    (!stratFilter || e.strategyKey === stratFilter)
+  ).sort((a,b) => Number(b.seenAt) - Number(a.seenAt));
+  const summary = document.getElementById('historySummary');
+  if(summary){
+    summary.textContent = list.length
+      ? `共 ${list.length} 筆（保留 7 天）· 顯示 ${filtered.length} · 最早 ${twFull(Math.min(...list.map(e => Number(e.seenAt))))}`
+      : '尚無紀錄（dashboard 開著輪詢時會自動累積系統偵測到的訊號）';
+  }
+  const rows = filtered.slice(0, 500);
+  body.innerHTML = rows.length ? rows.map(e => {
+    const sideCell = e.side === 'short' ? '<span class="neg" style="font-weight:600">空</span>' : '<span class="pos" style="font-weight:600">多</span>';
+    const scoreClass = Number(e.score) >= 85 ? 'pill high' : 'pill live';
+    return `<tr><td>${twFull(e.seenAt)}</td><td class="sym">${symLink(e.symbol, e.marketProvider)}</td><td><span class="${scoreClass}">${fmt(e.score,0)}</span></td><td class="left">${htmlEscape(strategyName(e) || e.strategyKey || '—')}</td><td>${sideCell}</td><td>${fmt(e.entry,8)}</td><td class="${signedClass(e.m1h)}">${showPct(e.m1h)}</td><td class="${signedClass(e.m4h)}">${showPct(e.m4h)}</td><td class="${signedClass(e.m24h)}">${showPct(e.m24h)}</td><td>${showPct((e.pos24h || 0) * 100)}</td><td>${fmt(e.vol,2)}x</td><td class="reason">${htmlEscape(e.reasons || '')}</td></tr>`;
+  }).join('') : `<tr><td class="sym muted" colspan="12">${list.length ? '無符合篩選的紀錄' : '尚無歷史訊號'}</td></tr>`;
+}
 function csvValue(v){ if(v === null || v === undefined) return ''; const s = typeof v === 'object' ? JSON.stringify(v) : String(v); return /[",\n]/.test(s) ? `"${s.replaceAll('"','""')}"` : s; }
 function downloadCsv(name, rows){
   if(!rows.length){ log('Nothing to download.'); return; }
