@@ -475,7 +475,11 @@ const CFG = {
   momentumMinAtr: 1,
   // strong_momentum_breakout 進場確認：>0 → 突破需前一根也成立才進(早進版，取代 1h≥4 追價擋單)；=0 → 恢復原 1h≥4 擋單。
   // ⚠️ 早進版實盤重放總分較高但屬雜訊尖峰(1 根時序翻轉、PUMP 仍滿停損)，非回測驗證，上線觀察用；不理想設回 0 即恢復原行為。
-  smbConfirmBars: 1
+  smbConfirmBars: 1,
+  // smbChaseHot：true → strong_momentum_breakout 突破一成立就進、追 1h≥6 的垂直噴出（跳過 ≥6 拒絕與 smbConfirmBars 確認）；false(預設) → 現況。
+  // ⚠️ 實盤重放此版 +14.3R vs 現況 +6.1（抗滑點到 ~2%，break-even ~3%），但進場點正是小幣滑點最兇處、解除全策略 ≥6 安全帶、harness 盲區。
+  // 非回測驗證，預設關；部署後手動開來實盤觀察真實成交價差，不理想設回 false。
+  smbChaseHot: false
 };
 let state = loadState();
 let latestPrices = {};
@@ -1290,7 +1294,10 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
     }
 
     if(marketContext.hasRecentImpulse && !marketContext.isConfirmedPullback) return null;
-    if(momentum1h >= 6) return null;
+    // smbChaseHot：突破成立時放行 smb 追噴出（跳過 1h≥6 通用拒絕與後面的確認），噴出中一成立就進（見 CFG 註解）
+    const smbBreakout = (momentum4h >= 15 && position24h >= 0.80) || (momentum24h >= 20 && distancePrevHigh >= -2);
+    const smbHotEntry = CFG.smbChaseHot && smbBreakout;
+    if(momentum1h >= 6 && !smbHotEntry) return null;
     if(position24h >= 0.95 && momentum1h > 0) return null;
     if(momentum24h >= 10 && momentum4h < -1 && !marketContext.isConfirmedPullback) return null;
     // 確認K線：最後一根已收盤 15m 必須收紅，避免接刀
@@ -1339,8 +1346,8 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
     };
     const key = strategyKey(metrics);
     // 追價策略硬性擋單：1h 已衝 4% 以上不追
-    // strong_momentum_breakout 進場確認（見 CFG smbConfirmBars 註解）
-    if(key === 'strong_momentum_breakout'){
+    // strong_momentum_breakout 進場確認（見 CFG smbConfirmBars 註解）；smbHotEntry(追噴出) 時跳過確認、一成立就進
+    if(key === 'strong_momentum_breakout' && !smbHotEntry){
       if(CFG.smbConfirmBars > 0){
         // 需突破條件在前一根收盤也成立（1 根確認），取代等 1h<4 的追價擋單
         let smbPrevOk = false;
