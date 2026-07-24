@@ -1246,6 +1246,18 @@ async function updatePositionIds(state, positionIds, options = {}) {
           closed = true;
           break;
         }
+        // volume_ignition 峰值回吐保護（真空區 +4~8%）：峰值 [+4%,+8%) 且回吐掉一半即了結。
+        // ⚠️ 使用者知情下要求、非乾淨 edge（實盤小幣 +5.3R vs OKX harness -48）；峰值上界=+8% 讓判定與 be 減倉互斥、不依賴迴圈順序。詳見 LESSONS 2026-07-24。
+        if (p.strategyKey === 'volume_ignition') {
+          const pk = p.side === 'short' ? p.lowest : p.highest;
+          const armed = p.side === 'short' ? (pk <= p.entry * 0.96 && pk > p.entry * 0.92) : (pk >= p.entry * 1.04 && pk < p.entry * 1.08);
+          const gaveBack = p.side === 'short' ? close >= p.entry - (p.entry - pk) * 0.5 : close <= p.entry + (pk - p.entry) * 0.5;
+          if (armed && gaveBack) {
+            closePosition(state, p, close, 'giveback_exit', kTime(bar));
+            closed = true;
+            break;
+          }
+        }
 
         recordProtectionEvents(p, kTime(bar));
         takeBreakEvenPartial(state, p, kTime(bar));
