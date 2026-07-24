@@ -1,0 +1,56 @@
+# LESSONS — 踩坑教訓（append-only，新條目在最上方；格式見 50-MAINTENANCE.md §2）
+
+## 2026-07-21 參數掃描的「單點暴衝」是過擬合，別選峰頂
+坑：動能出場的 stall 參數，掃描發現 8 根(+214.9,後加 ATR 條件後 158.0)遠優於鄰居(7→75/110、9→101/135)。數字很誘人。
+因：單一數值遠高於左右鄰居＝這個值剛好對上該窗口的 K 線時序(雜訊共振)，不是穩健結構。真實效果應該是平滑的(鄰居接近)。
+避：報告參數時一定要掃鄰居看形狀。平滑鄰居才可信；孤立尖峰要當雜訊，取穩健區中段(此例 9-10)而非峰頂(8)。使用者若知情堅持用峰頂，做成 CFG 一眼可調、並在 code 註解與 playbook 標明「峰頂值、可調」。
+
+## 2026-07-21 live tick 路徑的計數器不能用會被 tick 更新的欄位
+坑：動能出場要數「幾根收盤沒創新高」，若直接用 p.highest 判斷會出錯——p.highest 在 live-price(tick)路徑也會被盤中價更新，導致 bar 迴圈的「這根是否創新高」判斷失準。
+因：simulateTrade 是純 bar 迴圈(highest 只在 bar 更新)，但 live 有 bar 迴圈 + tick 迴圈兩條路徑共用 p.highest。
+避：計數器用獨立欄位(p.momExtreme 只在 bar 迴圈更新的收盤高水位)，與 tick 更新的 p.highest 脫鉤。凡是「跨 tick 累積、只該由收盤 bar 推進」的狀態，都要自己的欄位，別借用會被 tick 動到的欄位。
+
+## 2026-07-21 「harness 看不到受益」≠「harness 顯示無影響」，改動仍必跑回測防退步
+坑：pullback 回檔深度帶用實盤小幣重放驗證（-51.4→-5.9），本以為跟 ember/延伸罰分一樣是「harness 盲區、回測不變」就要直接出；一跑 OKX 回測發現它**砍掉兩筆主流幣贏家、整體 -9**。
+因：ember/延伸那類型態根本不出現在主流幣（harness 真的看不到、也真的無影響）；但「回檔太淺」在主流幣是會出現的——低波動主流幣淺回檔是真回檔會贏，硬擋就是退步。兩者是不同性質，不能類推。
+避：任何進場/出場條件改動，即使受益證據來自實盤小幣，也一定要跑一次 harness 確認**沒有傷到看得見的主流幣**。分辨清楚「harness 看不到我要救的病人」vs「harness 看得到我誤傷的健康人」。解方常是把規則條件化（此例：淺尾只在 ATR≥2% 高波動時啟動，豁免低波動主流幣，兩個 universe 都不吃虧）。
+
+## 2026-07-20 回測 K 線 cache 會被 refetch 覆蓋，舊窗口結論無法交叉驗證
+坑：重抓 30 天 K 線後，上一個窗口（6/18–7/18）的 okx-candles.json 被覆蓋，新提案（分批比例）想回頭在舊窗口驗證已不可能。
+因：fetch-okx-candles.mjs 固定寫同一個檔名，只保留「從現在往回 N 天」。
+避：重抓前先 `cp scripts/.cache/okx-candles.json scripts/.cache/okx-candles.<日期>.json` 留檔（.cache 不進 git，只在本 session 內有效，但至少同 session 能交叉驗證）；跨窗口的重要結論要當天就把兩個窗口都跑完。
+
+## 2026-07-18 不可回測的機制至少要做實盤窗口重放
+坑：提案「trail/lock 獲利出場後同標的冷卻 12h」（防 AKE 追高回入），harness 測不了（候選生成已含 24h 全出場冷卻）就以「依型態判斷」直接實作進 PR；使用者一句「為什麼 12h」逼出重放驗算——同窗口它會殺掉 US +32.9 與 AKE +21.8 兩筆連環贏單，只擋掉一筆 -11.9，淨 -42.8，且那筆輸單本來就被延伸罰分擋住（誤區 D 重疊）。已撤。
+因：動能策略的獲利有一塊來自連續騎同一隻強勢幣，一刀切冷卻正砍在獲利來源；「不可回測」被當成「免驗證」。
+避：harness 測不了的機制，最低標準是拿實盤窗口把「會被擋掉的所有單」列出來算淨效果（贏家和輸家都要算），並檢查同批改動是否已有機制覆蓋同一案例。
+
+## 2026-07-18 backtest harness 抽取清單會漂移
+坑：跑 backtest-strategies.mjs 直接 ReferenceError: stopAtBarOpen is not defined——HTML 後來新增的函式沒進 harness 的抽取 names 清單。
+因：harness 用 new Function() 抽取固定名單的函式，HTML 新增依賴時名單不會自動更新。
+避：harness 掛掉先看是不是 names 清單缺函式（本次補了 stopAtBarOpen/effectiveStopFor/stopReasonFor）；改 simulateTrade/updatePositions 依賴鏈時順手檢查名單。
+
+## 2026-07-18 「保守恢復」直覺被回測推翻
+坑：直覺提案「連損暫停恢復後提高 paperMinScore +10 直到出現真獲利」，聽起來穩健；回測消融顯示大幅有害（PnL 288→124、勝率 52→43）。
+因：實盤 148 筆已證明分數對勝率無鑑別力（96-100 分桶反而是最差的一桶），拉高分數門檻不是提質是砍量，且會鎖死在保守模式（低分單被擋→沒有機會出現獲利單來解鎖）。
+避：任何「用分數當品質開關」的機制先跑回測；風控要用倉位/暫停等資金面手段，不要用分數面手段。
+
+## 2026-07-12 回測 harness 的 simulateTrade 不吃 evaluateSignal 的 risk 修改
+坑：用 --patch 改 evaluateSignal 裡的停損，回測結果與 baseline 一字不差，差點誤判「改動無效果」。
+因：backtest-strategies.mjs 呼叫 simulateTrade 時只傳 strategyKey，simulateTrade 內部自己重算 buildRisk，並有第二份 vi 窄停損實作（HTML ~L1433）；evaluateSignal 的 stop 修改對回測不可見。
+避：停損/停利類 patch 要打在 simulateTrade 的 risk 覆寫區（或 buildRisk 本體）；實作停損類改動時 HTML 要改 evaluateSignal + simulateTrade 兩處、worker 一處，共三處。
+
+## 2026-07-12 分批掃描仍會改變開倉排序
+坑：把 16 個掃描拆成每次 4 個後，每批就發布與開倉，前批候選會先占滿倉位，而且完整掃描週期拉長。
+因：只拆 CPU 工作，沒有把「收集候選、完整排序、決策開倉」做成同一個具冪等性的 generation。
+避：在 Durable Object 內累積完整 scan plan，16 個全成功後才發布；所有狀態異動由同一 coordinator 排隊並做版本檢查。
+
+## 2026-07-03 長行讓 Edit 比對失敗
+坑：momentum_trader_claude.html 有 500–900 字元長行（L155、L1255、L1828 附近），整行當 old_string 容易比對失敗。
+因：長行內容微差（空白、引號）就整段不匹配。
+避：old_string 取短而獨特的錨點片段；失敗兩次改用 python 按行號改。
+
+## 2026-07-03 策略邏輯是雙實作
+坑：HTML 與 worker 各有一份同名策略函式，資料源不同（Binance vs OKX），改一邊另一邊不會報錯。
+因：獨立模式與 24/7 runner 是平行實作。
+避：改策略先照 10-PROJECT-MAP 對照表在兩檔各 grep 一次。

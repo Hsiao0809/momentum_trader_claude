@@ -63,6 +63,9 @@ const DEFAULT_CFG = {
   // 低波動慢磨標的(股票代幣)豁免。stall=8 是積極值(峰頂，可調)；不理想改這兩個數字即可。
   momentumStallBars: 8,
   momentumMinAtr: 1,
+  // strong_momentum_breakout 進場確認：>0 → 突破需前一根也成立才進(早進版，取代 1h≥4 追價擋單)；=0 → 恢復原 1h≥4 擋單。
+  // ⚠️ 早進版實盤重放總分較高但屬雜訊尖峰(1 根時序翻轉、PUMP 仍滿停損)，非回測驗證，上線觀察用；不理想設回 0 即恢復原行為。
+  smbConfirmBars: 1,
   symbolStopCooldownMs: 24 * 60 * 60 * 1000,
   scanLimit: 35,
   maxKlineScans: 16,
@@ -1995,7 +1998,26 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
     };
     const key = strategyKey(metrics);
     // 追價策略硬性擋單：1h 已衝 4% 以上不追
-    if (key === 'strong_momentum_breakout' && momentum1h >= 4) return null;
+    // strong_momentum_breakout 進場確認（見 DEFAULT_CFG smbConfirmBars 註解）
+    if (key === 'strong_momentum_breakout') {
+      if (cfg.smbConfirmBars > 0) {
+        // 需突破條件在前一根收盤也成立（1 根確認），取代等 1h<4 的追價擋單
+        let smbPrevOk = false;
+        if (c.length >= 98) {
+          const p1 = kClose(c[c.length - 2]);
+          const w1 = c.slice(-97, -1);
+          const pos1 = rangePosition(p1, w1.map(kLow), w1.map(kHigh));
+          const ph1 = Math.max(...c.slice(-98, -2).map(kHigh));
+          const m4_1 = pct(kClose(c[c.length - 18]), p1) || 0;
+          const m24_1 = pct(kClose(c[c.length - 98]), p1) || 0;
+          const dph1 = pct(ph1, p1) || 0;
+          smbPrevOk = (m4_1 >= 15 && pos1 >= 0.80) || (m24_1 >= 20 && dph1 >= -2);
+        }
+        if (!smbPrevOk) return null;
+      } else if (momentum1h >= 4) {
+        return null;
+      }
+    }
     // 餘燼單硬性擋單：量能已縮且 1h 停滯＝買在漲完後的停頓（7/18 SMSN/DRAM 三連停損型態）
     if ((key === 'volume_ignition' || key === 'narrative_momentum') && volumeRatio < 1 && momentum1h < 1) return null;
     // 回檔深度理智帶：太深（>60%）＝趨勢已破（NBIS 型），無條件擋；太淺（<15%）＝才停頓就接刀（USUSDT/BANK 型），
@@ -2831,11 +2853,15 @@ function anomalyScore(ticker, previous) {
     ? Math.max(0, (ticker.quoteVolumeFloat / previous.quoteVolumeFloat - 1) * 100)
     : 0;
   const liquidityWeight = Math.max(0, Math.log10(Math.max(ticker.normalizedQuoteVolume || ticker.quoteVolumeFloat, 1) / 1_000_000));
+  // 短期動能：與上次 snapshot 相比的即時價格漲幅。剛起漲的幣 24h 漲幅還沒累積，
+  // 但此項馬上反映，讓新鮮突破更快插進 anomaly 掃描優先層（純計算、不增 subrequest）。
+  const recentMovePct = previous?.last ? Math.max(0, (ticker.last / previous.last - 1) * 100) : 0;
 
   return positiveChange * 2
     + rangePressure * 1.2
     + Math.min(rankJump, 50) * 1.5
     + Math.min(quoteVolumeGrowthPct, 250) * 0.35
+    + Math.min(recentMovePct, 30) * 4
     + liquidityWeight * 2;
 }
 
