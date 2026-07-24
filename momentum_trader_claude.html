@@ -229,6 +229,16 @@
       </div>
     </div>
     <div class="drawer-section">
+      <span class="drawer-section-title">策略開關（即時套用到 runner）</span>
+      <div class="controls">
+        <label><input id="cfgSmbChaseHot" type="checkbox"> smbChaseHot：追噴出進場（預設關）</label>
+        <label>smbConfirmBars（smb 進場確認根數，0=用舊 1h≥4 擋單）<input id="cfgSmbConfirmBars" type="number" min="0" max="5" step="1"></label>
+        <label>動能出場：停滯根數 <input id="cfgMomentumStallBars" type="number" min="3" max="48" step="1"></label>
+        <label>動能出場：ATR 門檻 <input id="cfgMomentumMinAtr" type="number" min="0" max="10" step="0.5">%</label>
+        <span class="muted" style="font-size:11px">需先填上方 Worker token；改動即時送到 runner，下一 tick 生效。smbChaseHot 開啟時 smbConfirmBars 自動失效（互斥）。</span>
+      </div>
+    </div>
+    <div class="drawer-section">
       <span class="drawer-section-title">回測</span>
       <div class="controls">
         <label>天數 <select id="days"><option>7</option><option selected>30</option><option>90</option></select></label>
@@ -476,10 +486,10 @@ const CFG = {
   // strong_momentum_breakout 進場確認：>0 → 突破需前一根也成立才進(早進版，取代 1h≥4 追價擋單)；=0 → 恢復原 1h≥4 擋單。
   // ⚠️ 早進版實盤重放總分較高但屬雜訊尖峰(1 根時序翻轉、PUMP 仍滿停損)，非回測驗證，上線觀察用；不理想設回 0 即恢復原行為。
   smbConfirmBars: 1,
-  // smbChaseHot：true → strong_momentum_breakout 突破一成立就進、追 1h≥6 的垂直噴出（跳過 ≥6 拒絕與 smbConfirmBars 確認）；false(預設) → 現況。
-  // ⚠️ 實盤重放此版 +14.3R vs 現況 +6.1（抗滑點到 ~2%，break-even ~3%），但進場點正是小幣滑點最兇處、解除全策略 ≥6 安全帶、harness 盲區。
-  // 非回測驗證，預設關；部署後手動開來實盤觀察真實成交價差，不理想設回 false。
-  smbChaseHot: false
+  // smbChaseHot：true → strong_momentum_breakout 突破一成立就進、追 1h≥6 的垂直噴出（跳過 ≥6 拒絕與 smbConfirmBars 確認）。
+  // ⚠️ 實盤重放此版 +14.3R vs 等冷卻 +6.1（抗滑點到 ~2%，break-even ~3%），但進場點正是小幣滑點最兇處、解除全策略 ≥6 安全帶、harness 盲區、非回測驗證。
+  // 預設開（使用者決定，因已有 dashboard 開關可隨時關）；緊盯實盤成交價 vs 訊號 K 收盤的價差＝真實滑點，不理想用開關設回 false。
+  smbChaseHot: true
 };
 let state = loadState();
 let latestPrices = {};
@@ -975,6 +985,7 @@ function toggleSettingsDrawer(forceOpen){
   button.setAttribute('aria-label', open ? '關閉設定與工具' : '開啟設定與工具');
   if(open){
     updatePaperAction();
+    refreshStrategyToggles();
     requestAnimationFrame(() => document.getElementById('settingsClose')?.focus());
   } else if(drawer.contains(document.activeElement)){
     button.focus();
@@ -1005,7 +1016,7 @@ async function togglePaperState(){
 async function updateServerConfig(){
   if(!SERVER_MODE) return;
   try {
-    const payload = { initialEquity: CFG.initialEquity, riskPerTrade: CFG.riskPerTrade };
+    const payload = { initialEquity: CFG.initialEquity, riskPerTrade: CFG.riskPerTrade, smbChaseHot: CFG.smbChaseHot, smbConfirmBars: CFG.smbConfirmBars, momentumStallBars: CFG.momentumStallBars, momentumMinAtr: CFG.momentumMinAtr };
     const data = await serverRequest('/config', { method:'POST', body: payload });
     if(data.state){ state = data.state; paintAll(); }
     setSyncStatus(`Worker config saved · ${tw(nowMs())}`);
@@ -2717,6 +2728,28 @@ function setupCapitalInputs(){
     log(`Equity 基準設為 ${v} U（PnL 保留）`);
     updateServerConfig();
   });
+  setupStrategyToggles();
+}
+// 從 runner 現值（SERVER_MODE 下 state.cfg 為準）回填開關 UI，並同步 CFG，避免送出時用舊預設覆蓋 runner
+function refreshStrategyToggles(){
+  ['smbChaseHot','smbConfirmBars','momentumStallBars','momentumMinAtr'].forEach(f => {
+    if(SERVER_MODE && state.cfg && f in state.cfg) CFG[f] = state.cfg[f];
+  });
+  const c = document.getElementById('cfgSmbChaseHot'); if(c) c.checked = Boolean(CFG.smbChaseHot);
+  const cb = document.getElementById('cfgSmbConfirmBars'); if(cb) cb.value = CFG.smbConfirmBars;
+  const sb = document.getElementById('cfgMomentumStallBars'); if(sb) sb.value = CFG.momentumStallBars;
+  const ma = document.getElementById('cfgMomentumMinAtr'); if(ma) ma.value = CFG.momentumMinAtr;
+}
+function setupStrategyToggles(){
+  const chase = document.getElementById('cfgSmbChaseHot');
+  chase?.addEventListener('change', () => { CFG.smbChaseHot = chase.checked; saveState(); log(`smbChaseHot = ${chase.checked}`); updateServerConfig(); });
+  const conf = document.getElementById('cfgSmbConfirmBars');
+  conf?.addEventListener('change', () => { const v = Math.max(0, Math.round(Number(conf.value) || 0)); conf.value = v; CFG.smbConfirmBars = v; saveState(); updateServerConfig(); });
+  const stall = document.getElementById('cfgMomentumStallBars');
+  stall?.addEventListener('change', () => { const v = clamp(Math.round(Number(stall.value) || 8), 3, 48); stall.value = v; CFG.momentumStallBars = v; saveState(); updateServerConfig(); });
+  const atr = document.getElementById('cfgMomentumMinAtr');
+  atr?.addEventListener('change', () => { const v = clamp(Number(atr.value) || 1, 0, 10); atr.value = v; CFG.momentumMinAtr = v; saveState(); updateServerConfig(); });
+  refreshStrategyToggles();
 }
 
 setupPnlChart();
