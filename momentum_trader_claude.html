@@ -1558,6 +1558,8 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
     if(side === 'short'){
       mfe = Math.max(mfe, (entry - low)  / entry * 100);
       mae = Math.min(mae, (entry - high) / entry * 100);
+      // volume_ignition 峰值回吐保護（空單鏡像，見多單註解與 LESSONS 2026-07-24）
+      if(strategyKey === 'volume_ignition' && lowest <= entry*0.96 && lowest > entry*0.92 && close >= entry - (entry-lowest)*0.5){ exit=close; exitTime=kTime(bar); realized+=remainingQty*(entry-exit); reason='giveback_exit'; break; }
       if(!bePartialDone && low <= risk.beTrigger){
         const sq=remainingQty*0.25;
         realized+=sq*(entry-risk.beTrigger);
@@ -1571,6 +1573,10 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
     } else {
       mfe = Math.max(mfe, pct(entry, high) || 0);
       mae = Math.min(mae, pct(entry, low)  || 0);
+      // volume_ignition 峰值回吐保護（真空區 +4~8%）：峰值落在 [+4%,+8%) 且從峰值回吐掉一半即了結。
+      // ⚠️ 使用者知情下要求、非乾淨 edge：實盤小幣(如 DRAM 0.8% ATR)重放 +5.3R，但 OKX harness 反而 -48（158→110）。
+      //   同一種低 ATR volume_ignition 在兩樣本結果相反＝雜訊而非穩健，ATR 門檻救不了(DRAM 自己就低 ATR)。詳見 LESSONS 2026-07-24。
+      if(strategyKey === 'volume_ignition' && highest >= entry*1.04 && highest < entry*1.08 && close <= entry + (highest-entry)*0.5){ exit=close; exitTime=kTime(bar); realized+=remainingQty*(exit-entry); reason='giveback_exit'; break; }
       if(!bePartialDone && high >= risk.beTrigger){
         const sq=remainingQty*0.25;
         realized+=sq*(risk.beTrigger-entry);
@@ -1903,6 +1909,14 @@ async function updatePositions(){
         if(p.bePartialDone && Number(p.atrPct||0) >= CFG.momentumMinAtr && Number(p.barsSinceExtreme||0) >= CFG.momentumStallBars){
           closePosition(p, close, 'momentum_exit', kTime(bar));
           closed = true; break;
+        }
+        // volume_ignition 峰值回吐保護（真空區 +4~8%）：峰值 [+4%,+8%) 且回吐掉一半即了結。
+        // ⚠️ 使用者知情下要求、非乾淨 edge（實盤小幣 +5.3R vs OKX harness -48）；峰值上界=+8% 讓判定與 be 減倉互斥、不依賴迴圈順序。詳見 LESSONS 2026-07-24。
+        if(p.strategyKey === 'volume_ignition'){
+          const pk = p.side==='short' ? p.lowest : p.highest;
+          const armed = p.side==='short' ? (pk <= p.entry*0.96 && pk > p.entry*0.92) : (pk >= p.entry*1.04 && pk < p.entry*1.08);
+          const gaveBack = p.side==='short' ? close >= p.entry - (p.entry-pk)*0.5 : close <= p.entry + (pk-p.entry)*0.5;
+          if(armed && gaveBack){ closePosition(p, close, 'giveback_exit', kTime(bar)); closed = true; break; }
         }
         if(!p.tp1Done && (p.side==='short' ? low<=p.tp1 : high>=p.tp1)){
           takeTP1(p, kTime(bar));
