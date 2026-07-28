@@ -244,7 +244,8 @@
         <label>smbConfirmBars（smb 進場確認根數，0=用舊 1h≥4 擋單）<input id="cfgSmbConfirmBars" type="number" min="0" max="5" step="1"></label>
         <label>動能出場：停滯根數 <input id="cfgMomentumStallBars" type="number" min="3" max="48" step="1"></label>
         <label>動能出場：ATR 門檻 <input id="cfgMomentumMinAtr" type="number" min="0" max="10" step="0.5">%</label>
-        <span class="muted" style="font-size:11px">需先填上方 Worker token；改動即時送到 runner，下一 tick 生效。smbChaseHot 開啟時 smbConfirmBars 自動失效（互斥）。</span>
+        <label>動能出場：低ATR標的停滯根數 <input id="cfgMomentumLowAtrStallBars" type="number" min="3" max="200" step="1"></label>
+        <span class="muted" style="font-size:11px">需先填上方 Worker token；改動即時送到 runner，下一 tick 生效。smbChaseHot 開啟時 smbConfirmBars 自動失效（互斥）。低ATR標的（股票代幣等，ATR 低於上面門檻）改用較長的停滯根數而非豁免；設很大＝回到舊的完全豁免。</span>
       </div>
     </div>
     <div class="drawer-section">
@@ -512,10 +513,14 @@ const CFG = {
   maxHoldHours: 72,
   cooldownBars: 96,
   symbolStopCooldownMs: 24 * 60 * 60 * 1000,
-  // 動能熄火出場：已過 be 減倉、且進場 ATR≥momentumMinAtr% 的高波動標的，連續 momentumStallBars 根 15m 收盤未創新高(多)/新低(空)→了結剩餘。
-  // 低波動慢磨標的(股票代幣)豁免。stall=8 是實盤重放/回測的積極值(峰頂，非最穩健，可調)；不理想改這兩個數字即可。
+  // 動能熄火出場：已過 be 減倉、連續 N 根 15m 收盤未創新高(多)/新低(空)→了結剩餘。
+  // ATR≥momentumMinAtr% 的高波動標的用 momentumStallBars(8)；低波動慢磨標的(股票代幣)改用較長的
+  // momentumLowAtrStallBars，而非完全豁免——原本的豁免讓 PEPE 這類標的停滯 106 根仍不出場、峰值 +13.7% 一路吐回。
+  // 16 取自 OKX 回測 8~22 全區間優於豁免的平滑高原中段(109.5→159.5，PF 1.22→1.32)，非峰頂(20=162.8)；
+  // 實盤重放 +23.9R→+24.7R 且大贏家零損傷（停滯出場依定義不會砍到正在創新極值的部位）。詳見 70-STRATEGY-PLAYBOOK。
   momentumStallBars: 8,
   momentumMinAtr: 1,
+  momentumLowAtrStallBars: 16,
   // strong_momentum_breakout 進場確認：>0 → 突破需前一根也成立才進(早進版，取代 1h≥4 追價擋單)；=0 → 恢復原 1h≥4 擋單。
   // ⚠️ 早進版實盤重放總分較高但屬雜訊尖峰(1 根時序翻轉、PUMP 仍滿停損)，非回測驗證，上線觀察用；不理想設回 0 即恢復原行為。
   smbConfirmBars: 1,
@@ -1050,7 +1055,7 @@ async function togglePaperState(){
 async function updateServerConfig(){
   if(!SERVER_MODE) return;
   try {
-    const payload = { initialEquity: CFG.initialEquity, riskPerTrade: CFG.riskPerTrade, smbChaseHot: CFG.smbChaseHot, smbConfirmBars: CFG.smbConfirmBars, momentumStallBars: CFG.momentumStallBars, momentumMinAtr: CFG.momentumMinAtr };
+    const payload = { initialEquity: CFG.initialEquity, riskPerTrade: CFG.riskPerTrade, smbChaseHot: CFG.smbChaseHot, smbConfirmBars: CFG.smbConfirmBars, momentumStallBars: CFG.momentumStallBars, momentumMinAtr: CFG.momentumMinAtr, momentumLowAtrStallBars: CFG.momentumLowAtrStallBars };
     const data = await serverRequest('/config', { method:'POST', body: payload });
     if(data.state){ state = data.state; paintAll(); }
     setSyncStatus(`Worker config saved · ${tw(nowMs())}`);
@@ -1584,7 +1589,7 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
     if(side === 'short' ? low < lowest : high > highest) lastExtremeIdx = i;
     highest = Math.max(highest, high); lowest = Math.min(lowest, low);
     // 動能熄火出場（見 CFG 註解）：已過 be、ATR 夠高、連續 momentumStallBars 根未創新極值 → 了結剩餘
-    if(bePartialDone && atrValue >= CFG.momentumMinAtr && (i - lastExtremeIdx) >= CFG.momentumStallBars){
+    if(bePartialDone && (i - lastExtremeIdx) >= (atrValue >= CFG.momentumMinAtr ? CFG.momentumStallBars : CFG.momentumLowAtrStallBars)){
       exit=close; exitTime=kTime(bar);
       realized += remainingQty * (side === 'short' ? entry-exit : exit-entry);
       reason='momentum_exit'; break;
@@ -1940,7 +1945,7 @@ async function updatePositions(){
           closePosition(p, effectiveStop, stopReasonFor(p), kTime(bar));
           closed = true; break;
         }
-        if(p.bePartialDone && Number(p.atrPct||0) >= CFG.momentumMinAtr && Number(p.barsSinceExtreme||0) >= CFG.momentumStallBars){
+        if(p.bePartialDone && Number(p.barsSinceExtreme||0) >= (Number(p.atrPct||0) >= CFG.momentumMinAtr ? CFG.momentumStallBars : CFG.momentumLowAtrStallBars)){
           closePosition(p, close, 'momentum_exit', kTime(bar));
           closed = true; break;
         }
@@ -2867,13 +2872,14 @@ function setupCapitalInputs(){
 }
 // 從 runner 現值（SERVER_MODE 下 state.cfg 為準）回填開關 UI，並同步 CFG，避免送出時用舊預設覆蓋 runner
 function refreshStrategyToggles(){
-  ['smbChaseHot','smbConfirmBars','momentumStallBars','momentumMinAtr'].forEach(f => {
+  ['smbChaseHot','smbConfirmBars','momentumStallBars','momentumMinAtr','momentumLowAtrStallBars'].forEach(f => {
     if(SERVER_MODE && state.cfg && f in state.cfg) CFG[f] = state.cfg[f];
   });
   const c = document.getElementById('cfgSmbChaseHot'); if(c) c.checked = Boolean(CFG.smbChaseHot);
   const cb = document.getElementById('cfgSmbConfirmBars'); if(cb) cb.value = CFG.smbConfirmBars;
   const sb = document.getElementById('cfgMomentumStallBars'); if(sb) sb.value = CFG.momentumStallBars;
   const ma = document.getElementById('cfgMomentumMinAtr'); if(ma) ma.value = CFG.momentumMinAtr;
+  const lb = document.getElementById('cfgMomentumLowAtrStallBars'); if(lb) lb.value = CFG.momentumLowAtrStallBars;
 }
 function setupStrategyToggles(){
   const chase = document.getElementById('cfgSmbChaseHot');
@@ -2884,6 +2890,8 @@ function setupStrategyToggles(){
   stall?.addEventListener('change', () => { const v = clamp(Math.round(Number(stall.value) || 8), 3, 48); stall.value = v; CFG.momentumStallBars = v; saveState(); updateServerConfig(); });
   const atr = document.getElementById('cfgMomentumMinAtr');
   atr?.addEventListener('change', () => { const v = clamp(Number(atr.value) || 1, 0, 10); atr.value = v; CFG.momentumMinAtr = v; saveState(); updateServerConfig(); });
+  const lowStall = document.getElementById('cfgMomentumLowAtrStallBars');
+  lowStall?.addEventListener('change', () => { const v = clamp(Math.round(Number(lowStall.value) || 16), 3, 200); lowStall.value = v; CFG.momentumLowAtrStallBars = v; saveState(); updateServerConfig(); });
   refreshStrategyToggles();
 }
 
