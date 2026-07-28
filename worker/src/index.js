@@ -59,10 +59,14 @@ const DEFAULT_CFG = {
   paperMinScore: 82,
   maxHoldHours: 72,
   cooldownBars: 96,
-  // 動能熄火出場：已過 be 減倉、且進場 ATR≥momentumMinAtr% 的高波動標的，連續 momentumStallBars 根 15m 收盤未創新高(多)/新低(空)→了結剩餘。
-  // 低波動慢磨標的(股票代幣)豁免。stall=8 是積極值(峰頂，可調)；不理想改這兩個數字即可。
+  // 動能熄火出場：已過 be 減倉、連續 N 根 15m 收盤未創新高(多)/新低(空)→了結剩餘。
+  // ATR≥momentumMinAtr% 的高波動標的用 momentumStallBars(8)；低波動慢磨標的(股票代幣)改用較長的
+  // momentumLowAtrStallBars，而非完全豁免——原本的豁免讓 PEPE 這類標的停滯 106 根仍不出場、峰值 +13.7% 一路吐回。
+  // 16 取自 OKX 回測 8~22 全區間優於豁免的平滑高原中段(109.5→159.5，PF 1.22→1.32)，非峰頂(20=162.8)；
+  // 實盤重放 +23.9R→+24.7R 且大贏家零損傷（停滯出場依定義不會砍到正在創新極值的部位）。詳見 70-STRATEGY-PLAYBOOK。
   momentumStallBars: 8,
   momentumMinAtr: 1,
+  momentumLowAtrStallBars: 16,
   // strong_momentum_breakout 進場確認：>0 → 突破需前一根也成立才進(早進版，取代 1h≥4 追價擋單)；=0 → 恢復原 1h≥4 擋單。
   // ⚠️ 早進版實盤重放總分較高但屬雜訊尖峰(1 根時序翻轉、PUMP 仍滿停損)，非回測驗證，上線觀察用；不理想設回 0 即恢復原行為。
   smbConfirmBars: 1,
@@ -824,6 +828,7 @@ function applyConfig(state, body = {}) {
   if (Number.isFinite(Number(body.smbConfirmBars))) state.cfg.smbConfirmBars = Math.max(0, Math.round(Number(body.smbConfirmBars)));
   if (Number.isFinite(Number(body.momentumStallBars))) state.cfg.momentumStallBars = clamp(Math.round(Number(body.momentumStallBars)), 3, 48);
   if (Number.isFinite(Number(body.momentumMinAtr))) state.cfg.momentumMinAtr = clamp(Number(body.momentumMinAtr), 0, 10);
+  if (Number.isFinite(Number(body.momentumLowAtrStallBars))) state.cfg.momentumLowAtrStallBars = clamp(Math.round(Number(body.momentumLowAtrStallBars)), 3, 200);
 }
 
 async function createScanPlan(state, rankedResult = null) {
@@ -1241,7 +1246,7 @@ async function updatePositionIds(state, positionIds, options = {}) {
         const madeNew = p.side === 'short' ? barExt < prevExt : barExt > prevExt;
         p.momExtreme = p.side === 'short' ? Math.min(prevExt, barExt) : Math.max(prevExt, barExt);
         p.barsSinceExtreme = madeNew ? 0 : (Number(p.barsSinceExtreme || 0) + 1);
-        if (p.bePartialDone && Number(p.atrPct || 0) >= state.cfg.momentumMinAtr && Number(p.barsSinceExtreme || 0) >= state.cfg.momentumStallBars) {
+        if (p.bePartialDone && Number(p.barsSinceExtreme || 0) >= (Number(p.atrPct || 0) >= state.cfg.momentumMinAtr ? state.cfg.momentumStallBars : state.cfg.momentumLowAtrStallBars)) {
           closePosition(state, p, close, 'momentum_exit', kTime(bar));
           closed = true;
           break;
