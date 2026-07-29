@@ -105,9 +105,12 @@ function statsFor(trades) {
 const args = process.argv.slice(2);
 let label = 'baseline';
 let patchOld = null, patchNew = null;
+let robustIters = 0, robustKeep = 0.85;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--label') label = args[++i];
   else if (args[i] === '--patch') { patchOld = args[++i]; patchNew = args[++i]; }
+  else if (args[i] === '--robust') robustIters = Number(args[++i]) || 200;
+  else if (args[i] === '--keep') robustKeep = Number(args[++i]) || 0.85;
 }
 
 let html = readFileSync(new URL('../momentum_trader_claude.html', import.meta.url), 'utf8');
@@ -146,6 +149,8 @@ for (const [instId, rows] of Object.entries(candles)) {
     if (sig && sig.score >= MIN_SCORE && !(sig.strategyKey === 'narrative_momentum' && sig.score < NARRATIVE_MIN)) {
       const trade = mod.simulateTrade(symbol, sig.strategyKey, sig.score, rows, i + 1, 1000);
       if (trade) {
+        trade.quoteVolume = quoteVolume; // applyPortfolio 的 tie-break 需要（對齊線上 signalSort）
+        trade.atrPctEntry = sig.atrPct;  // 供 tie-break 實驗用
         candidates.push(trade);
         i = Math.max(i + 1, mod.findIndex(rows, trade.exitTime) + COOLDOWN_BARS);
         continue;
@@ -159,6 +164,39 @@ const portfolio = mod.applyPortfolio(candidates.map((t) => ({ ...t })));
 const byStrategy = {};
 for (const t of candidates) (byStrategy[t.strategyKey] ??= []).push(t);
 
+// ── 穩健性：組合 PnL 對「候選集長什麼樣」極度敏感（只隨機移除 158 筆多單中的 5 筆，
+// PnL 的 5–95% 就是 91~266）。單一數字比較會嚴重誤導，所以對候選集做子抽樣，
+// 回報中位數與 5/95 百分位。比較兩個設定時看區間有沒有分離，不要看單點差。
+// 見 LESSONS 2026-07-29。
+function percentile(sorted, p) {
+  if (!sorted.length) return 0;
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor(sorted.length * p)))];
+}
+function robustness(list, iters, keepFrac) {
+  if (!iters) return null;
+  // 決定性種子，讓同一份候選集重跑得到同樣的分布（A/B 才可比）
+  let seed = 20260729;
+  const rand = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  const pnls = [];
+  for (let it = 0; it < iters; it++) {
+    const sub = list.filter(() => rand() < keepFrac);
+    if (!sub.length) continue;
+    pnls.push(mod.summarize(mod.applyPortfolio(sub.map((t) => ({ ...t })))).netPnl);
+  }
+  const raw = [...pnls];
+  pnls.sort((a, b) => a - b);
+  return {
+    iters: pnls.length,
+    keepFrac,
+    p05: +percentile(pnls, 0.05).toFixed(1),
+    median: +percentile(pnls, 0.5).toFixed(1),
+    p95: +percentile(pnls, 0.95).toFixed(1),
+    // 未排序的逐次結果，供「同種子＝同子樣本」的配對比較用（比獨立比中位數有力得多）
+    samples: raw.map((v) => +v.toFixed(2)),
+  };
+}
+const robust = robustness(candidates, robustIters, robustKeep);
+
 const result = {
   label,
   patch: patchOld !== null ? { old: patchOld, new: patchNew } : null,
@@ -170,6 +208,7 @@ const result = {
   candidates: statsFor(candidates),
   byStrategy: Object.fromEntries(Object.entries(byStrategy).map(([k, v]) => [k, statsFor(v)])),
   portfolio: { ...statsFor(portfolio), summary: mod.summarize(portfolio) },
+  robustness: robust,
 };
 
 mkdirSync(CACHE_DIR, { recursive: true });
@@ -179,13 +218,21 @@ writeFileSync(outFile, JSON.stringify(result, null, 1));
 console.log(JSON.stringify({
   label,
   candidateCount: result.candidates.n,
+  // 候選層總R：不經過倉位額度分配，因此不受路徑噪音影響——比較兩個設定時以此為主要訊號
+  candidateTotalR: +(result.candidates.avgR * result.candidates.n).toFixed(1),
+  candidateAvgR: +result.candidates.avgR.toFixed(3),
   portfolioTrades: result.portfolio.n,
   portfolioPnl: +result.portfolio.pnl.toFixed(1),
   winRate: +result.portfolio.winRate.toFixed(1),
   pf: +result.portfolio.pf.toFixed(2),
   maxDrawdownPct: +result.portfolio.summary.maxDrawdownPct.toFixed(1),
+  robustness: result.robustness && { ...result.robustness, samples: undefined },
   perStrategyPnl: Object.fromEntries(
     Object.entries(result.byStrategy).map(([k, s]) => [k, +s.pnl.toFixed(1)]),
   ),
 }, null, 2));
+if (!result.robustness) {
+  console.log('\n⚠️  portfolioPnl 對候選集極度敏感（誤差棒可達 ±100 以上）。比較兩個設定時請加 --robust 200，');
+  console.log('   並以 candidateTotalR（確定性）與 robustness 區間是否分離為準，不要只看 portfolioPnl 單點差。');
+}
 console.log(`\nFull detail written to ${outFile.pathname}`);

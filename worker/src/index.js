@@ -67,6 +67,10 @@ const DEFAULT_CFG = {
   momentumStallBars: 8,
   momentumMinAtr: 1,
   momentumLowAtrStallBars: 16,
+  // 「突破前 24h 高點」加分。⚠️ harness 證據強烈顯示有害（設 0 後平均R 0.176→0.342、配對 96% 勝率、
+  // 回撤 10.6%→6.3%、p=1.9%），但實盤 82 筆多單重建未確認（p=56%，該組僅 24 筆）。
+  // 預設維持現行 5；想跑實盤 A/B 就在 dashboard 設 0。詳見 70-STRATEGY-PLAYBOOK。
+  scorePrevHighBreakBonus: 5,
   // strong_momentum_breakout 進場確認：>0 → 突破需前一根也成立才進(早進版，取代 1h≥4 追價擋單)；=0 → 恢復原 1h≥4 擋單。
   // ⚠️ 早進版實盤重放總分較高但屬雜訊尖峰(1 根時序翻轉、PUMP 仍滿停損)，非回測驗證，上線觀察用；不理想設回 0 即恢復原行為。
   smbConfirmBars: 1,
@@ -829,6 +833,7 @@ function applyConfig(state, body = {}) {
   if (Number.isFinite(Number(body.momentumStallBars))) state.cfg.momentumStallBars = clamp(Math.round(Number(body.momentumStallBars)), 3, 48);
   if (Number.isFinite(Number(body.momentumMinAtr))) state.cfg.momentumMinAtr = clamp(Number(body.momentumMinAtr), 0, 10);
   if (Number.isFinite(Number(body.momentumLowAtrStallBars))) state.cfg.momentumLowAtrStallBars = clamp(Math.round(Number(body.momentumLowAtrStallBars)), 3, 200);
+  if (Number.isFinite(Number(body.scorePrevHighBreakBonus))) state.cfg.scorePrevHighBreakBonus = clamp(Math.round(Number(body.scorePrevHighBreakBonus)), 0, 20);
 }
 
 async function createScanPlan(state, rankedResult = null) {
@@ -1996,7 +2001,7 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
     if (momentum1h > 0) { score += 5; reasons.push(`1h still positive ${momentum1h.toFixed(2)}%`); }
     if (position24h >= 0.75) { score += 20; reasons.push(`price in top ${(position24h * 100).toFixed(1)}% of 24h range`); }
     if (distancePrevHigh >= -4) { score += 10; reasons.push(`within ${Math.abs(distancePrevHigh).toFixed(2)}% of prior 24h high`); }
-    if (distancePrevHigh > 0) { score += 5; reasons.push('breaking prior 24h high'); }
+    if (distancePrevHigh > 0) { score += cfg.scorePrevHighBreakBonus; reasons.push('breaking prior 24h high'); }
     if (volumeRatio >= 1.5) { score += 20; reasons.push(`15m volume expansion ${volumeRatio.toFixed(2)}x`); }
     if (volumeRatio >= 3) { score += 5; reasons.push('volume expansion is unusually strong'); }
     if (momentum1h <= 18) { score += 10; reasons.push('not a one-candle runaway move'); } else { score -= 15; reasons.push(`1h move ${momentum1h.toFixed(2)}% is overheated`); }
