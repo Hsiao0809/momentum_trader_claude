@@ -245,6 +245,7 @@
         <label>動能出場：停滯根數 <input id="cfgMomentumStallBars" type="number" min="3" max="48" step="1"></label>
         <label>動能出場：ATR 門檻 <input id="cfgMomentumMinAtr" type="number" min="0" max="10" step="0.5">%</label>
         <label>動能出場：低ATR標的停滯根數 <input id="cfgMomentumLowAtrStallBars" type="number" min="3" max="200" step="1"></label>
+        <label>「突破前24h高」加分（回測建議 0，實盤未確認）<input id="cfgScorePrevHighBreakBonus" type="number" min="0" max="20" step="1"></label>
         <span class="muted" style="font-size:11px">需先填上方 Worker token；改動即時送到 runner，下一 tick 生效。smbChaseHot 開啟時 smbConfirmBars 自動失效（互斥）。低ATR標的（股票代幣等，ATR 低於上面門檻）改用較長的停滯根數而非豁免；設很大＝回到舊的完全豁免。</span>
       </div>
     </div>
@@ -521,6 +522,12 @@ const CFG = {
   momentumStallBars: 8,
   momentumMinAtr: 1,
   momentumLowAtrStallBars: 16,
+  // 「突破前 24h 高點」加分。⚠️ 這一項有強烈的 harness 證據顯示是**有害**的：設 0 後
+  // 候選 220→169 筆但總R 38.6→57.8、平均R 0.176→0.342（隨機砍單不會改變平均R，故非「少交易」假象），
+  // 配對子樣本比較 96% 勝率、中位 +243、回撤 10.6%→6.3%，置換檢定 p=1.9%。
+  // 但實盤 82 筆多單重建**沒有確認**（突破組 -0.025R vs 未突破 -0.015R，p=56%，該組僅 24 筆檢定力低）。
+  // 依「兩樣本未同時確認就不改預設」的規矩，預設維持現行 5；想跑實盤 A/B 就在 dashboard 設 0。
+  scorePrevHighBreakBonus: 5,
   // strong_momentum_breakout 進場確認：>0 → 突破需前一根也成立才進(早進版，取代 1h≥4 追價擋單)；=0 → 恢復原 1h≥4 擋單。
   // ⚠️ 早進版實盤重放總分較高但屬雜訊尖峰(1 根時序翻轉、PUMP 仍滿停損)，非回測驗證，上線觀察用；不理想設回 0 即恢復原行為。
   smbConfirmBars: 1,
@@ -1055,7 +1062,7 @@ async function togglePaperState(){
 async function updateServerConfig(){
   if(!SERVER_MODE) return;
   try {
-    const payload = { initialEquity: CFG.initialEquity, riskPerTrade: CFG.riskPerTrade, smbChaseHot: CFG.smbChaseHot, smbConfirmBars: CFG.smbConfirmBars, momentumStallBars: CFG.momentumStallBars, momentumMinAtr: CFG.momentumMinAtr, momentumLowAtrStallBars: CFG.momentumLowAtrStallBars };
+    const payload = { initialEquity: CFG.initialEquity, riskPerTrade: CFG.riskPerTrade, smbChaseHot: CFG.smbChaseHot, smbConfirmBars: CFG.smbConfirmBars, momentumStallBars: CFG.momentumStallBars, momentumMinAtr: CFG.momentumMinAtr, momentumLowAtrStallBars: CFG.momentumLowAtrStallBars, scorePrevHighBreakBonus: CFG.scorePrevHighBreakBonus };
     const data = await serverRequest('/config', { method:'POST', body: payload });
     if(data.state){ state = data.state; paintAll(); }
     setSyncStatus(`Worker config saved · ${tw(nowMs())}`);
@@ -1366,7 +1373,7 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
     if(momentum1h > 0){ score += 5; reasons.push(`1h still positive ${momentum1h.toFixed(2)}%`); }
     if(position24h >= 0.75){ score += 20; reasons.push(`price in top ${(position24h*100).toFixed(1)}% of 24h range`); }
     if(distancePrevHigh >= -4){ score += 10; reasons.push(`within ${Math.abs(distancePrevHigh).toFixed(2)}% of prior 24h high`); }
-    if(distancePrevHigh > 0){ score += 5; reasons.push('breaking prior 24h high'); }
+    if(distancePrevHigh > 0){ score += CFG.scorePrevHighBreakBonus; reasons.push('breaking prior 24h high'); }
     if(volumeRatio >= 1.5){ score += 20; reasons.push(`15m volume expansion ${volumeRatio.toFixed(2)}x`); }
     if(volumeRatio >= 3){ score += 5; reasons.push('volume expansion is unusually strong'); }
     if(momentum1h <= 18){ score += 10; reasons.push('not a one-candle runaway move'); } else { score -= 15; reasons.push(`1h move ${momentum1h.toFixed(2)}% is overheated`); }
@@ -1643,7 +1650,11 @@ function applyPortfolio(trades){
   const selected = [], active = [], activeSymbols = new Map(), lossTimes = [];
   let equity = CFG.initialEquity, peak = equity, pausedUntil = 0;
   const dayKey = ms => Math.floor((ms + 8*60*60*1000) / (24*60*60*1000)); // UTC+8 日界
-  trades.sort((a,b)=>a.entryTime-b.entryTime);
+  // 同一時點競爭同一個倉位額度時，必須與線上 signalSort 一致（分數 DESC → quoteVolume DESC），
+  // 否則回測的選單是任意順序、與 runner 不同源。見 LESSONS 2026-07-29。
+  trades.sort((a,b)=> (a.entryTime-b.entryTime)
+    || (Number(b.score||0)-Number(a.score||0))
+    || (Number(b.quoteVolume||0)-Number(a.quoteVolume||0)));
   for(const t of trades){
     while(active.length && active[0] <= t.entryTime) active.shift();
     for(const [sym, exit] of [...activeSymbols.entries()]) if(exit <= t.entryTime) activeSymbols.delete(sym);
@@ -1693,7 +1704,7 @@ async function runBacktest(){
         const sig = evaluateSignal(t.symbol, rows.slice(0, i + 1), t.quoteVolumeFloat, barTime, riskOff, minScore);
         if(sig && sig.score >= minScore){
           const trade = simulateTrade(t.symbol, sig.strategyKey, sig.score, rows, i + 1, CFG.initialEquity);
-          if(trade){ candidates.push(trade); i = Math.max(i + 1, findIndex(rows, trade.exitTime) + CFG.cooldownBars); continue; }
+          if(trade){ trade.quoteVolume = t.quoteVolumeFloat; candidates.push(trade); i = Math.max(i + 1, findIndex(rows, trade.exitTime) + CFG.cooldownBars); continue; }
         }
         i++;
       }
@@ -2872,7 +2883,7 @@ function setupCapitalInputs(){
 }
 // 從 runner 現值（SERVER_MODE 下 state.cfg 為準）回填開關 UI，並同步 CFG，避免送出時用舊預設覆蓋 runner
 function refreshStrategyToggles(){
-  ['smbChaseHot','smbConfirmBars','momentumStallBars','momentumMinAtr','momentumLowAtrStallBars'].forEach(f => {
+  ['smbChaseHot','smbConfirmBars','momentumStallBars','momentumMinAtr','momentumLowAtrStallBars','scorePrevHighBreakBonus'].forEach(f => {
     if(SERVER_MODE && state.cfg && f in state.cfg) CFG[f] = state.cfg[f];
   });
   const c = document.getElementById('cfgSmbChaseHot'); if(c) c.checked = Boolean(CFG.smbChaseHot);
@@ -2880,6 +2891,7 @@ function refreshStrategyToggles(){
   const sb = document.getElementById('cfgMomentumStallBars'); if(sb) sb.value = CFG.momentumStallBars;
   const ma = document.getElementById('cfgMomentumMinAtr'); if(ma) ma.value = CFG.momentumMinAtr;
   const lb = document.getElementById('cfgMomentumLowAtrStallBars'); if(lb) lb.value = CFG.momentumLowAtrStallBars;
+  const pb = document.getElementById('cfgScorePrevHighBreakBonus'); if(pb) pb.value = CFG.scorePrevHighBreakBonus;
 }
 function setupStrategyToggles(){
   const chase = document.getElementById('cfgSmbChaseHot');
@@ -2892,6 +2904,8 @@ function setupStrategyToggles(){
   atr?.addEventListener('change', () => { const v = clamp(Number(atr.value) || 1, 0, 10); atr.value = v; CFG.momentumMinAtr = v; saveState(); updateServerConfig(); });
   const lowStall = document.getElementById('cfgMomentumLowAtrStallBars');
   lowStall?.addEventListener('change', () => { const v = clamp(Math.round(Number(lowStall.value) || 16), 3, 200); lowStall.value = v; CFG.momentumLowAtrStallBars = v; saveState(); updateServerConfig(); });
+  const phb = document.getElementById('cfgScorePrevHighBreakBonus');
+  phb?.addEventListener('change', () => { const v = clamp(Math.round(Number(phb.value) || 0), 0, 20); phb.value = v; CFG.scorePrevHighBreakBonus = v; saveState(); updateServerConfig(); });
   refreshStrategyToggles();
 }
 
