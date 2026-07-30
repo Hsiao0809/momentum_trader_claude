@@ -153,6 +153,9 @@
 | OKX 主流／高流動性 | 4~6 |
 | 剩餘（XYZ 或 anomaly 分數最高者） | 其餘 |
 
+**已實作（2026-07-29）**：`cfg.gateScanMin`（預設 **8**）在 crypto 掃描額度內保留給 Gate-only；`fillCryptoScanBudgetByProvider` 先填滿 gate 保留額，其餘給 OKX，**任一邊候選不足時由另一邊回填**，掃描總數仍是 16（不增加 subrequest）。可經 `POST /control/config {"gateScanMin": N}` 即時分階段調整（8→10）或設 0 完全退回原行為，下一 tick 生效。實際份額記錄在 `scanMeta.providerMeta.gateScanMin` / `gateScanned` / `okxScanned`。
+⚠️ **這個改動的已知副作用**：OKX 只剩 4 個名額，而 core tier（前 3 名、每 30 分鐘掃一次）本身就要 3 個——**OKX 的 anomaly（異常分數）掃描實質上被壓到約 1 個名額**。若觀察到 OKX 主流幣的訊號數量崩掉且組合增量 PnL 為負，先把 `gateScanMin` 調回 6 再評估。
+
 **必須同時維持的護欄**：最低成交量／OI／深度／價差過濾；Gate-only 單獨記錄 signal price、paper fill 與滑點；同敘事／同方向小幣 cluster cap（避免一次佔滿倉位）；**驗證指標看「新增 Gate slot 的組合增量 PnL」，不是既有 Gate 交易的平均 R**（playbook 的槽位排擠效應：多掃到好訊號不代表組合更好）。
 
 **歷史績效的部分仍是待驗證假設，不是這個方向的依據**：

@@ -56,7 +56,7 @@ assert.match(worker, /Paper state chunk length mismatch/);
 assert.match(worker, /successfulScanCount \+ skippedScanCount < plan\.tickers\.length/);
 assert.match(worker, /plan\.tickers\.length !== requiredCount/);
 assert.match(worker, /universeTier: 'reserve'/);
-assert.match(worker, /fillCryptoScanBudget\(cryptoCandidates, cryptoRanked, cryptoBudget\)/);
+assert.match(worker, /fillCryptoScanBudgetByProvider\(cryptoCandidates, cryptoRanked, cryptoBudget, gateFloor\)/);
 assert.match(worker, /Scan plan expired before publication/);
 assert.match(worker, /batchScannedCount: plan\.tickers\.length/);
 assert.match(worker, /market\/ticker', \{ instId \}, 0, 0/);
@@ -219,17 +219,32 @@ assert.equal(deferredResult.scanPending, true);
 assert.equal(deferredState.scanPlan.retryCount, 1);
 assert.ok(deferredDelay >= 29_000 && deferredDelay <= 30_000, 'Gate rate limits must schedule a delayed retry');
 
-const fillCryptoScanBudgetSource = extractFunction(worker, 'fillCryptoScanBudget');
-const fillCryptoScanBudget = Function(
-  `${fillCryptoScanBudgetSource}; return fillCryptoScanBudget;`,
+const fillByProvider = Function(
+  `${extractFunction(worker, 'fillCryptoScanBudgetByProvider')}; return fillCryptoScanBudgetByProvider;`,
 )();
-const filledCrypto = fillCryptoScanBudget(
+// gateFloor=0：與保留機制引入前的行為完全相同（primary 保留 tier、ranked 補位標 reserve）
+const filledCrypto = fillByProvider(
   [{ instId: 'A', universeTier: 'anomaly' }],
   [{ instId: 'A' }, { instId: 'B' }, { instId: 'C' }, { instId: 'D' }],
   3,
+  0,
 );
 assert.deepEqual(filledCrypto.map((ticker) => ticker.instId), ['A', 'B', 'C']);
 assert.deepEqual(filledCrypto.map((ticker) => ticker.universeTier), ['anomaly', 'reserve', 'reserve']);
+
+// Gate-only 保留名額：gateFloor 個先給 gate，其餘給 okx，總數不變
+const okxPool = Array.from({ length: 10 }, (_, index) => ({ instId: `O${index}`, marketProvider: 'okx' }));
+const gatePool = Array.from({ length: 10 }, (_, index) => ({ instId: `G${index}`, marketProvider: 'gate' }));
+const split = fillByProvider([], [...okxPool, ...gatePool], 12, 8);
+assert.equal(split.length, 12, 'gate 保留名額不得改變掃描總數');
+assert.equal(split.filter((ticker) => ticker.marketProvider === 'gate').length, 8);
+assert.equal(split.filter((ticker) => ticker.marketProvider === 'okx').length, 4);
+// gate 候選不足時由 okx 回填，不留空額
+const scarce = fillByProvider([], [...okxPool, { instId: 'G0', marketProvider: 'gate' }], 11, 8);
+assert.equal(scarce.length, 11, 'gate 不足時要用盡可用候選');
+assert.equal(scarce.filter((ticker) => ticker.marketProvider === 'gate').length, 1);
+// gateFloor 大於 budget 時不得溢出
+assert.equal(fillByProvider([], [...gatePool, ...okxPool], 4, 99).length, 4);
 
 const advanceScanPlanSource = extractFunction(worker, 'advanceScanPlan');
 const makeAdvanceScanPlan = (scanBatch, createPlan, assertUniverse = () => {}) => Function(

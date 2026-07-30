@@ -18,7 +18,7 @@ function extractFunction(source, name) {
 }
 
 const source = readFileSync('worker/src/index.js', 'utf8');
-const dependencyNames = ['positiveInt', 'anomalyScore', 'rotatingSlice', 'buildTickerSnapshot', 'fillCryptoScanBudget'];
+const dependencyNames = ['positiveInt', 'anomalyScore', 'rotatingSlice', 'buildTickerSnapshot', 'fillCryptoScanBudgetByProvider'];
 const ranked = [
   ...Array.from({ length: 60 }, (_, index) => ({
     instId: `TOKEN${index}-USDT-SWAP`,
@@ -44,14 +44,27 @@ const ranked = [
     normalizedQuoteVolume: 100_000_000 - index * 2_000_000,
     minQuoteVolume: 5_000_000,
   })),
+  ...Array.from({ length: 30 }, (_, index) => ({
+    instId: `GATE${index}_USDT`,
+    symbol: `GATE${index}USDT`,
+    marketProvider: 'gate',
+    rank: index + 1,
+    last: 5 + index,
+    change24h: index % 3,
+    range24hPosition: 0.6,
+    quoteVolumeFloat: 40_000_000 - index * 500_000,
+    normalizedQuoteVolume: 160_000_000 - index * 2_000_000,
+    minQuoteVolume: 5_000_000,
+  })),
 ];
 const rankedInstruments = async () => ({
   ranked,
   providerMeta: {
     okxListed: 60,
     okxEligible: 60,
-    gateListed: 0,
-    gateEligible: 0,
+    gateListed: 30,
+    gateEligible: 30,
+    gateExclusive: 30,
     xyzListed: 20,
     xyzEligible: 20,
     xyzMinQuoteVolume: 5_000_000,
@@ -79,6 +92,7 @@ const cfg = {
   xyzCoreScanLimit: 1,
   xyzExtendedScanStart: 8,
   xyzExtendedScanBatch: 1,
+  gateScanMin: 8,
 };
 const state = {
   cfg,
@@ -119,3 +133,27 @@ assert.equal(reserveFilled.tickers.length, 16);
 assert.ok(reserveFilled.tickers.some((ticker) => ticker.universeTier === 'reserve'));
 
 console.log('XYZ scan allocation checks passed (16 total, reserve fill, XYZ anomaly/core/rotation coverage)');
+
+// Gate-only 保留名額：crypto 額度 12 個裡至少 8 個給 gate、其餘給 okx，總數仍是 16
+state.lastCoreScanAt = 0;
+state.scanCursor = 0;
+state.xyzScanCursor = 0;
+const reserved = await scanUniverse(state);
+assert.equal(reserved.tickers.length, 16);
+assert.equal(reserved.tickers.filter((ticker) => ticker.marketProvider === 'gate').length, 8);
+assert.equal(reserved.tickers.filter((ticker) => ticker.marketProvider === 'okx').length, 4);
+assert.equal(reserved.tickers.filter((ticker) => ticker.marketProvider === 'xyz').length, 4);
+assert.equal(reserved.meta.providerMeta.gateScanMin, 8);
+
+// gateScanMin=0 → 回到原本的混合排序，且掃描總數不變
+const legacyState = { ...state, cfg: { ...cfg, gateScanMin: 0 }, lastCoreScanAt: 0, scanCursor: 0, xyzScanCursor: 0 };
+const legacy = await scanUniverse(legacyState);
+assert.equal(legacy.tickers.length, 16);
+assert.equal(legacy.meta.providerMeta.gateScanMin, 0);
+
+// gateScanMin 超過 crypto 額度時不得排擠 XYZ 的保留名額
+const greedyState = { ...state, cfg: { ...cfg, gateScanMin: 99 }, lastCoreScanAt: 0, scanCursor: 0, xyzScanCursor: 0 };
+const greedy = await scanUniverse(greedyState);
+assert.equal(greedy.tickers.length, 16);
+assert.equal(greedy.tickers.filter((ticker) => ticker.marketProvider === 'xyz').length, 4);
+assert.equal(greedy.tickers.filter((ticker) => ticker.marketProvider === 'gate').length, 12);
