@@ -85,6 +85,9 @@ const DEFAULT_CFG = {
   scanBatchSize: COMPLETE_SCAN_BATCH_SIZE,
   anomalyScanLimit: 10,
   coreScanLimit: 3,
+  // Gate-only 在 crypto 掃描額度內的保留名額（crypto budget = maxKlineScans - xyzScanLimit = 12）。
+  // 8 = 第一階段（Gate-only 8 / OKX 4），可在 dashboard 即時調整分階段放大或退回 0。
+  gateScanMin: 8,
   coreScanEveryMs: 30 * 60 * 1000,
   extendedScanStart: 35,
   extendedScanEnd: 160,
@@ -834,6 +837,8 @@ function applyConfig(state, body = {}) {
   if (Number.isFinite(Number(body.momentumMinAtr))) state.cfg.momentumMinAtr = clamp(Number(body.momentumMinAtr), 0, 10);
   if (Number.isFinite(Number(body.momentumLowAtrStallBars))) state.cfg.momentumLowAtrStallBars = clamp(Math.round(Number(body.momentumLowAtrStallBars)), 3, 200);
   if (Number.isFinite(Number(body.scorePrevHighBreakBonus))) state.cfg.scorePrevHighBreakBonus = clamp(Math.round(Number(body.scorePrevHighBreakBonus)), 0, 20);
+  // Gate-only 掃描保留名額：可即時分階段放大（8→10）或退回 0，下一 tick 生效
+  if (Number.isFinite(Number(body.gateScanMin))) state.cfg.gateScanMin = clamp(Math.round(Number(body.gateScanMin)), 0, 16);
 }
 
 async function createScanPlan(state, rankedResult = null) {
@@ -1441,7 +1446,16 @@ async function scanUniverse(state, rankedResult = null) {
     [...anomaly, ...extended, ...core].map((ticker) => [ticker.instId, ticker]),
   ).values()];
   const cryptoBudget = Math.max(0, maxKlineScans - xyzSelected.length);
-  const cryptoSelected = fillCryptoScanBudget(cryptoCandidates, cryptoRanked, cryptoBudget);
+  // Gate-only 保留額度（2026-07-29 使用者決定）：目的是擴大可交易機會集——gate 掛牌 862 個
+  // 合約、通過量能門檻 64 個且全部是 OKX 沒有的標的（見 mergeProviderInstruments）。
+  // 先給 Gate 至少 gateScanMin 個名額、其餘給 OKX；任一邊候選不足時由另一邊回填，
+  // 掃描總數仍是 cryptoBudget（不增加 subrequest，符合 PROJECT-MAP 的 ≤16 K線/tick）。
+  // 依據與護欄見 .claude/docs/80-DOUBLING-PLAN.md §4A。gateScanMin=0 即回到原本的混合排序行為。
+  const gateFloor = Math.min(
+    Number.isFinite(Number(cfg.gateScanMin)) ? Math.max(0, Math.round(Number(cfg.gateScanMin))) : 8,
+    cryptoBudget,
+  );
+  const cryptoSelected = fillCryptoScanBudgetByProvider(cryptoCandidates, cryptoRanked, cryptoBudget, gateFloor);
   const deduped = [...cryptoSelected, ...xyzSelected].slice(0, maxKlineScans);
 
   if (coreDue && deduped.some((ticker) => ticker.universeTier === 'core')) state.lastCoreScanAt = now;
@@ -1459,6 +1473,7 @@ async function scanUniverse(state, rankedResult = null) {
         okxScanned: deduped.filter((ticker) => ticker.marketProvider === 'okx').length,
         gateScanned: deduped.filter((ticker) => ticker.marketProvider === 'gate').length,
         xyzScanned: deduped.filter((ticker) => ticker.marketProvider === 'xyz').length,
+        gateScanMin: gateFloor,
       },
       universeSnapshotAgeMs: universeSource === 'cached' ? Date.now() - Number(state.tickerSnapshot?.savedAt || 0) : 0,
       maxKlineScans,
@@ -1484,16 +1499,38 @@ async function scanUniverse(state, rankedResult = null) {
   };
 }
 
-function fillCryptoScanBudget(primary, ranked, budget) {
-  const selected = new Map(primary.map((ticker) => [ticker.instId, ticker]));
-  for (const ticker of ranked) {
-    if (selected.size >= budget) break;
-    if (!selected.has(ticker.instId)) {
-      selected.set(ticker.instId, { ...ticker, universeTier: 'reserve' });
+// 在 cryptoBudget 內先保留 gateFloor 個 Gate-only 名額，剩下才給 OKX；任一邊候選不足時
+// 由另一邊回填，回傳長度永遠是 min(budget, 可用候選數)——掃描總數不因這個分配而改變。
+// gateFloor=0 時行為與保留機制引入前完全相同（單一輪次依原順序填滿）。
+function fillCryptoScanBudgetByProvider(primary, ranked, budget, gateFloor = 0) {
+  const isGate = (ticker) => ticker.marketProvider === 'gate';
+  const pool = [...primary, ...ranked];
+  const selected = new Map();
+  let gateCount = 0;
+  const add = (ticker) => {
+    if (selected.has(ticker.instId)) return;
+    selected.set(ticker.instId, ticker.universeTier ? ticker : { ...ticker, universeTier: 'reserve' });
+    if (isGate(ticker)) gateCount += 1;
+  };
+  const gateTarget = Math.min(Math.max(0, gateFloor), budget);
+  if (gateTarget > 0) {
+    for (const ticker of pool) {
+      if (gateCount >= gateTarget) break;
+      if (isGate(ticker)) add(ticker);
     }
+    const okxTarget = budget - gateTarget;
+    for (const ticker of pool) {
+      if (selected.size - gateCount >= okxTarget) break;
+      if (!isGate(ticker)) add(ticker);
+    }
+  }
+  for (const ticker of pool) {
+    if (selected.size >= budget) break;
+    add(ticker);
   }
   return [...selected.values()].slice(0, budget);
 }
+
 
 async function rankedInstruments(cfg, options = {}) {
   const okxCoolingDown = Boolean(options.skipOkx);

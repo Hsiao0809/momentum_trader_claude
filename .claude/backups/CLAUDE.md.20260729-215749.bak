@@ -28,7 +28,6 @@
 | 要寫派工 prompt | `.claude/docs/40-TEMPLATES.md`（複製填空） |
 | 要更新這些制度檔、踩坑後記教訓 | `.claude/docs/50-MAINTENANCE.md` + `LESSONS.md` |
 | 要評估/調整策略參數與邏輯、判斷改動好不好 | `.claude/docs/70-STRATEGY-PLAYBOOK.md`（含 `scripts/backtest-strategies.mjs` 回測工具用法） |
-| 使用者談報酬目標／要不要放大倉位／月翻倍可行嗎 | `.claude/docs/80-DOUBLING-PLAN.md`（實盤期望值、f 掃描、容量天花板） |
 | session 開始、想知道環境背景與前人交接 | `.claude/docs/60-LETTER.md` |
 | 想知道這些規則的依據 | `.claude/docs/00-DIAGNOSIS.md` |
 
