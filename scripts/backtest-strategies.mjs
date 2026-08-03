@@ -55,7 +55,7 @@ function loadStrategyModule(source) {
     'buildRisk', 'strategyKey', 'sideForStrategy', 'btcRiskOff',
     'kOpen', 'kHigh', 'kLow', 'kClose', 'kVol', 'kTime',
     'pct', 'safeDiv', 'clamp', 'mean', 'median', 'ema',
-    'simulateTrade', 'positionSize', 'applyPortfolio', 'summarize', 'findIndex',
+    'simulateTrade', 'positionSize', 'applyPortfolio', 'repeatLossBlocked', 'summarize', 'findIndex',
     'stopAtBarOpen', 'effectiveStopFor', 'stopReasonFor',
   ];
   const dependencies = names.map((name) => extractFunction(source, name)).join('\n');
