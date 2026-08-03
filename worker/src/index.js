@@ -80,6 +80,14 @@ const DEFAULT_CFG = {
   // 注意：已部署的 runner state.cfg 若已存 false，改此預設不會生效——需用 dashboard 開關或 POST /control/config {smbChaseHot:true} 覆蓋。
   smbChaseHot: true,
   symbolStopCooldownMs: 24 * 60 * 60 * 1000,
+  // 同標的連敗封鎖：連續 repeatLossBlockCount 筆虧損出場 → 該標的封鎖 repeatLossBlockDays 天。
+  // symbolStopCooldownMs 那條 24h 冷卻沒有累積記憶——等滿 24h 之後，第 4 次進場與第 1 次待遇完全相同
+  // （實盤 271 筆：#4+ 佔 era C 虧損的 86%，見 90-POSTMORTEM-2026-08 §3.5）。
+  // ⚠️ 用「連敗」而非「終身上限」：終身上限會誤殺尾巴（最大單筆 +13.2R 是第 2 次進場、
+  // BANKUSDT +3.5R 在第 6 次），OKX 回測也證實終身版是負貢獻（連 3 敗永久＝虛無分布 2.5 百分位）。
+  // 設 repeatLossBlockCount = 0 即關閉（POST /control/config 可即時改）。
+  repeatLossBlockCount: 2,
+  repeatLossBlockDays: 7,
   scanLimit: 35,
   maxKlineScans: 16,
   scanBatchSize: COMPLETE_SCAN_BATCH_SIZE,
@@ -837,6 +845,9 @@ function applyConfig(state, body = {}) {
   if (Number.isFinite(Number(body.momentumMinAtr))) state.cfg.momentumMinAtr = clamp(Number(body.momentumMinAtr), 0, 10);
   if (Number.isFinite(Number(body.momentumLowAtrStallBars))) state.cfg.momentumLowAtrStallBars = clamp(Math.round(Number(body.momentumLowAtrStallBars)), 3, 200);
   if (Number.isFinite(Number(body.scorePrevHighBreakBonus))) state.cfg.scorePrevHighBreakBonus = clamp(Math.round(Number(body.scorePrevHighBreakBonus)), 0, 20);
+  // 同標的連敗封鎖：設 0 即關閉，不必重新部署
+  if (Number.isFinite(Number(body.repeatLossBlockCount))) state.cfg.repeatLossBlockCount = clamp(Math.round(Number(body.repeatLossBlockCount)), 0, 10);
+  if (Number.isFinite(Number(body.repeatLossBlockDays))) state.cfg.repeatLossBlockDays = clamp(Number(body.repeatLossBlockDays), 0, 90);
   // Gate-only 掃描保留名額：可即時分階段放大（8→10）或退回 0，下一 tick 生效
   if (Number.isFinite(Number(body.gateScanMin))) state.cfg.gateScanMin = clamp(Math.round(Number(body.gateScanMin)), 0, 16);
 }
@@ -1058,6 +1069,22 @@ function signalPriceKey(signal) {
   return `${signal.marketProvider || providerFromInstId(signal.instId)}:${signal.instId}`;
 }
 
+// 同標的連敗封鎖（見 DEFAULT_CFG.repeatLossBlockCount 註解）。只看 now 之前已平倉的紀錄；
+// 連續虧損計數遇到任何一筆獲利即歸零，因此不會像終身上限那樣誤殺「輸兩次後噴出」的尾巴。
+function repeatLossBlocked(trades, symbol, now, cfg) {
+  const need = Number(cfg?.repeatLossBlockCount || 0);
+  if (!need) return false;
+  const base = baseAsset(symbol);
+  const hist = (trades || [])
+    .filter((t) => baseAsset(t.symbol) === base && Number(t.exitTime) <= now)
+    .sort((a, b) => a.exitTime - b.exitTime);
+  let streak = 0, lastLoss = 0;
+  for (const t of hist) {
+    if (Number(t.pnl) < 0) { streak++; lastLoss = Number(t.exitTime); } else streak = 0;
+  }
+  return streak >= need && (now - lastLoss) < Number(cfg.repeatLossBlockDays || 7) * 24 * 60 * 60 * 1000;
+}
+
 function eligibleEntrySignals(state, signals = state.signals) {
   const cfg = state.cfg;
   if (state.pausedUntil && Date.now() < state.pausedUntil) return;
@@ -1072,6 +1099,7 @@ function eligibleEntrySignals(state, signals = state.signals) {
     .sort(signalSort)
     .filter((sig) => !openSymbols.has(baseAsset(sig.symbol))
       && !stoppedRecent.has(baseAsset(sig.symbol))
+      && !repeatLossBlocked(state.trades, sig.symbol, Date.now(), cfg)
       && sig.score >= cfg.paperMinScore
       && !(sig.strategyKey === 'narrative_momentum' && sig.score < cfg.paperMinScore + 8));
 }
@@ -2646,21 +2674,30 @@ async function sendNotificationWithRetry(task) {
   return lastFailure;
 }
 
+// 獲利目標以 R（＝停損寬度）計價，不是固定 %。
+// 舊版寫死 tp1/be/lockTrigger/lockLevel = entry*1.20/1.08/1.15/1.05，等於在 3% 停損上是
+// 6.7R/2.7R/5.0R/1.7R、在 10% 停損上只剩 2.0R/0.8R/1.5R/0.5R——同一組數字在不同標的
+// 代表完全不同的報酬比，寬停損標的的上檔被結構性壓縮（見 90-POSTMORTEM-2026-08 §3.2：
+// lock_stop 平均 R 1.52→0.58、9-11% 停損那桶 55 筆淨賺 $1）。
+// 下面維持舊版 20:8:15:5 的相對結構不變，只把計價單位換成 R，以 beTrigger = 1.8R 為錨
+// （1.9R 以上會把 12% 權益熔斷帶進場，見回測掃描）。
+// 回退方式：把這四個乘數換回 1.20/1.08/1.15/1.05 的固定 % 寫法（兩檔都要）。
 function buildRisk(entry, atrValue, side = 'long', structStop = null) {
   const atrStopPct = Math.max(3, Math.min(8, 1.2 * atrValue));
   const trailPct = Math.max(8, 1.5 * atrValue);
+  const R = { tp1: 4.5, be: 1.8, lockTrigger: 3.375, lockLevel: 1.125 };
   if (side === 'short') {
     // 結構停損：放在近期擺動高點上方，取較寬者，寬度上限 10%
     let stop = entry * (1 + atrStopPct / 100);
     if (structStop && structStop > stop) stop = Math.min(structStop, entry * 1.10);
     const stopPct = (stop / entry - 1) * 100;
-    return { stop, tp1: entry * 0.85, beTrigger: entry * 0.95, lockTrigger: entry * 0.90, lockLevel: entry * 0.97, trailPct, stopPct };
+    return { stop, tp1: entry * (1 - R.tp1 * stopPct / 100), beTrigger: entry * (1 - R.be * stopPct / 100), lockTrigger: entry * (1 - R.lockTrigger * stopPct / 100), lockLevel: entry * (1 - R.lockLevel * stopPct / 100), trailPct, stopPct };
   }
   // 結構停損：放在近期擺動低點下方，取較寬者，寬度上限 10%
   let stop = entry * (1 - atrStopPct / 100);
   if (structStop && structStop < stop) stop = Math.max(structStop, entry * 0.90);
   const stopPct = (1 - stop / entry) * 100;
-  return { stop, tp1: entry * 1.20, beTrigger: entry * 1.08, lockTrigger: entry * 1.15, lockLevel: entry * 1.05, trailPct, stopPct };
+  return { stop, tp1: entry * (1 + R.tp1 * stopPct / 100), beTrigger: entry * (1 + R.be * stopPct / 100), lockTrigger: entry * (1 + R.lockTrigger * stopPct / 100), lockLevel: entry * (1 + R.lockLevel * stopPct / 100), trailPct, stopPct };
 }
 
 function effectiveStopFor(p) {

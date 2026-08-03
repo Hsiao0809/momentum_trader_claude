@@ -514,6 +514,14 @@ const CFG = {
   maxHoldHours: 72,
   cooldownBars: 96,
   symbolStopCooldownMs: 24 * 60 * 60 * 1000,
+  // 同標的連敗封鎖：連續 repeatLossBlockCount 筆虧損出場 → 該標的封鎖 repeatLossBlockDays 天。
+  // symbolStopCooldownMs 那條 24h 冷卻沒有累積記憶——等滿 24h 之後，第 4 次進場與第 1 次待遇完全相同
+  // （實盤 271 筆：#4+ 佔 era C 虧損的 86%，見 90-POSTMORTEM-2026-08 §3.5）。
+  // ⚠️ 用「連敗」而非「終身上限」：終身上限會誤殺尾巴（最大單筆 +13.2R 是第 2 次進場、
+  // BANKUSDT +3.5R 在第 6 次），OKX 回測也證實終身版是負貢獻（連 3 敗永久＝虛無分布 2.5 百分位）。
+  // 設 repeatLossBlockCount = 0 即關閉。
+  repeatLossBlockCount: 2,
+  repeatLossBlockDays: 7,
   // 動能熄火出場：已過 be 減倉、連續 N 根 15m 收盤未創新高(多)/新低(空)→了結剩餘。
   // ATR≥momentumMinAtr% 的高波動標的用 momentumStallBars(8)；低波動慢磨標的(股票代幣)改用較長的
   // momentumLowAtrStallBars，而非完全豁免——原本的豁免讓 PEPE 這類標的停滯 106 根仍不出場、峰值 +13.7% 一路吐回。
@@ -1216,21 +1224,30 @@ function classifyMarketContext(rows, atrValue) {
     retracePct,
   };
 }
+// 獲利目標以 R（＝停損寬度）計價，不是固定 %。
+// 舊版寫死 tp1/be/lockTrigger/lockLevel = entry*1.20/1.08/1.15/1.05，等於在 3% 停損上是
+// 6.7R/2.7R/5.0R/1.7R、在 10% 停損上只剩 2.0R/0.8R/1.5R/0.5R——同一組數字在不同標的
+// 代表完全不同的報酬比，寬停損標的的上檔被結構性壓縮（見 90-POSTMORTEM-2026-08 §3.2：
+// lock_stop 平均 R 1.52→0.58、9-11% 停損那桶 55 筆淨賺 $1）。
+// 下面維持舊版 20:8:15:5 的相對結構不變，只把計價單位換成 R，以 beTrigger = 1.8R 為錨
+// （1.9R 以上會把 12% 權益熔斷帶進場，見回測掃描）。
+// 回退方式：把這四個乘數換回 1.20/1.08/1.15/1.05 的固定 % 寫法（兩檔都要）。
 function buildRisk(entry, atrValue, side='long', structStop=null){
   const atrStopPct = Math.max(3, Math.min(8, 1.2 * atrValue));
   const trailPct = Math.max(8, 1.5 * atrValue);
+  const R = { tp1:4.5, be:1.8, lockTrigger:3.375, lockLevel:1.125 };
   if(side === 'short'){
     // 結構停損：放在近期擺動高點上方，取較寬者，寬度上限 10%
     let stop = entry * (1 + atrStopPct/100);
     if(structStop && structStop > stop) stop = Math.min(structStop, entry * 1.10);
     const stopPct = (stop / entry - 1) * 100;
-    return { stop, tp1:entry*0.85, beTrigger:entry*0.95, lockTrigger:entry*0.90, lockLevel:entry*0.97, trailPct, stopPct };
+    return { stop, tp1:entry*(1 - R.tp1*stopPct/100), beTrigger:entry*(1 - R.be*stopPct/100), lockTrigger:entry*(1 - R.lockTrigger*stopPct/100), lockLevel:entry*(1 - R.lockLevel*stopPct/100), trailPct, stopPct };
   }
   // 結構停損：放在近期擺動低點下方，取較寬者，寬度上限 10%
   let stop = entry * (1 - atrStopPct/100);
   if(structStop && structStop < stop) stop = Math.max(structStop, entry * 0.90);
   const stopPct = (1 - stop / entry) * 100;
-  return { stop, tp1:entry*1.20, beTrigger:entry*1.08, lockTrigger:entry*1.15, lockLevel:entry*1.05, trailPct, stopPct };
+  return { stop, tp1:entry*(1 + R.tp1*stopPct/100), beTrigger:entry*(1 + R.be*stopPct/100), lockTrigger:entry*(1 + R.lockTrigger*stopPct/100), lockLevel:entry*(1 + R.lockLevel*stopPct/100), trailPct, stopPct };
 }
 function effectiveStopFor(p){
   if(p.side === 'short'){
@@ -1646,6 +1663,18 @@ function summarize(trades){
   });
   return { initialEquity:CFG.initialEquity, endingEquity:equity, netPnl:equity-CFG.initialEquity, netReturnPct:pct(CFG.initialEquity, equity)||0, tradeCount:trades.length, winRatePct:safeDiv(wins, trades.length, 0)*100, profitFactor:safeDiv(gp, gl, gp || 0), maxDrawdownPct:maxDd, avgR: trades.length ? mean(trades.map(t=>t.rMultiple)) : 0 };
 }
+// 同標的連敗封鎖（見 CFG.repeatLossBlockCount 註解）。trades 需含 symbol/pnl/exitTime，
+// 只看 now 之前已平倉的紀錄；連續虧損計數遇到任何一筆獲利即歸零。
+function repeatLossBlocked(trades, symbol, now){
+  const need = Number(CFG.repeatLossBlockCount || 0);
+  if(!need) return false;
+  const hist = (trades || [])
+    .filter(t => t.symbol === symbol && Number(t.exitTime) <= now)
+    .sort((a,b) => a.exitTime - b.exitTime);
+  let streak = 0, lastLoss = 0;
+  for(const t of hist){ if(Number(t.pnl) < 0){ streak++; lastLoss = Number(t.exitTime); } else streak = 0; }
+  return streak >= need && (now - lastLoss) < Number(CFG.repeatLossBlockDays || 7) * 24*60*60*1000;
+}
 function applyPortfolio(trades){
   const selected = [], active = [], activeSymbols = new Map(), lossTimes = [];
   let equity = CFG.initialEquity, peak = equity, pausedUntil = 0;
@@ -1659,6 +1688,7 @@ function applyPortfolio(trades){
     while(active.length && active[0] <= t.entryTime) active.shift();
     for(const [sym, exit] of [...activeSymbols.entries()]) if(exit <= t.entryTime) activeSymbols.delete(sym);
     if(t.entryTime < pausedUntil || active.length >= CFG.maxPositions || activeSymbols.has(t.symbol)) continue;
+    if(repeatLossBlocked(selected, t.symbol, t.entryTime)) continue;
     // Prop 日內熔斷：當日已實現從峰值回吐 ≥2.5% 權益（峰值>0）或當日虧損 ≥3% → 當日不再開新倉
     {
       const D = dayKey(t.entryTime);
@@ -1793,6 +1823,7 @@ async function paperTick(){
     .sort((a,b) => b.score - a.score || b.quoteVolume - a.quoteVolume)
     .filter(sig => !openSymbols.has(sig.symbol)
       && !stoppedRecent.has(sig.symbol)
+      && !repeatLossBlocked(state.trades, sig.symbol, nowMs())
       && sig.score >= CFG.paperMinScore
       && !(sig.strategyKey === 'narrative_momentum' && sig.score < CFG.paperMinScore + 8));
   const latestResults = await Promise.allSettled(candidates.map(async sig => [
