@@ -522,6 +522,12 @@ const CFG = {
   // 設 repeatLossBlockCount = 0 即關閉。
   repeatLossBlockCount: 2,
   repeatLossBlockDays: 7,
+  // 權益熔斷：累計從峰值回撤達 equityStopDrawdownPct% → running=false（整個 runner 停機）。
+  // 0 = 關閉（現行預設）。2026-11-14 使用者明確要求取消——原本寫死 12%，在 -14.17% 時把線上 runner
+  // 停住，且因為它在每一次 closePosition 都重檢，重啟後下一筆平倉就會再次觸發（見 90-POSTMORTEM §8）。
+  // ⚠️ 這是唯一會「停機」的風控；日內熔斷（-2.5%/-3%，只擋當日開倉）與連損暫停（6h 內 3 敗）仍在作用。
+  // 想恢復舊行為：設 12（dashboard 或 POST /control/config，不必重新部署）。
+  equityStopDrawdownPct: 0,
   // 動能熄火出場：已過 be 減倉、連續 N 根 15m 收盤未創新高(多)/新低(空)→了結剩餘。
   // ATR≥momentumMinAtr% 的高波動標的用 momentumStallBars(8)；低波動慢磨標的(股票代幣)改用較長的
   // momentumLowAtrStallBars，而非完全豁免——原本的豁免讓 PEPE 這類標的停滯 106 根仍不出場、峰值 +13.7% 一路吐回。
@@ -1699,7 +1705,7 @@ function applyPortfolio(trades){
       const eqDayStart = equity - cum;
       if((dayPeak > 0 && dayPeak - cum >= eqDayStart * 0.025) || cum <= -eqDayStart * 0.03) continue;
     }
-    if(safeDiv(peak-equity, peak, 0) >= 0.12) break;
+    if(CFG.equityStopDrawdownPct > 0 && safeDiv(peak-equity, peak, 0) >= CFG.equityStopDrawdownPct/100) break;
     selected.push(t); active.push(t.exitTime); active.sort((a,b)=>a-b); activeSymbols.set(t.symbol, t.exitTime);
     equity += t.pnl; peak = Math.max(peak, equity);
     // 滑動窗口連損暫停：6h 內 ≥3 筆虧損出場才暫停，暫停中繼續虧會延長；分散的虧損不觸發（回測 vC5：優於連續計數）
@@ -1923,7 +1929,7 @@ function closePosition(p, exit, reason, exitTime){
     const recentLosses = (state.trades || []).filter(t => t.pnl < 0 && exitTime - t.exitTime <= lossWindowMs).length;
     if(recentLosses >= 3) state.pausedUntil = Math.max(state.pausedUntil || 0, exitTime + lossWindowMs);
   }
-  if(safeDiv(state.peakEquity-state.equity, state.peakEquity, 0) >= 0.12) state.running = false;
+  if(CFG.equityStopDrawdownPct > 0 && safeDiv(state.peakEquity-state.equity, state.peakEquity, 0) >= CFG.equityStopDrawdownPct/100) state.running = false;
 }
 function takeBreakEvenPartial(p, exitTime){
   if(!p.bePartialEnabled || p.bePartialDone || p.tp1Done || !p.beTrigger) return false;

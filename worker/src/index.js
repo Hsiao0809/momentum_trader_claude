@@ -88,6 +88,13 @@ const DEFAULT_CFG = {
   // 設 repeatLossBlockCount = 0 即關閉（POST /control/config 可即時改）。
   repeatLossBlockCount: 2,
   repeatLossBlockDays: 7,
+  // 權益熔斷：累計從峰值回撤達 equityStopDrawdownPct% → running=false（整個 runner 停機）。
+  // 0 = 關閉（現行預設）。2026-11-14 使用者明確要求取消——原本寫死 12%，在 -14.17% 時把線上 runner
+  // 停住，且因為它在每一次 closePosition 都重檢，重啟後下一筆平倉就會再次觸發（見 90-POSTMORTEM §8）。
+  // ⚠️ 這是唯一會「停機」的風控；日內熔斷（dailyRiskHalt，-2.5%/-3%，只擋當日開倉）與
+  // 連損暫停（6h 內 3 敗 → pausedUntil）仍在作用，未一併移除。
+  // 想恢復舊行為：設 12（POST /control/config 即時生效，不必重新部署）。
+  equityStopDrawdownPct: 0,
   scanLimit: 35,
   maxKlineScans: 16,
   scanBatchSize: COMPLETE_SCAN_BATCH_SIZE,
@@ -848,6 +855,8 @@ function applyConfig(state, body = {}) {
   // 同標的連敗封鎖：設 0 即關閉，不必重新部署
   if (Number.isFinite(Number(body.repeatLossBlockCount))) state.cfg.repeatLossBlockCount = clamp(Math.round(Number(body.repeatLossBlockCount)), 0, 10);
   if (Number.isFinite(Number(body.repeatLossBlockDays))) state.cfg.repeatLossBlockDays = clamp(Number(body.repeatLossBlockDays), 0, 90);
+  // 權益熔斷門檻：0 = 關閉（現行預設），12 = 恢復舊行為。不必重新部署
+  if (Number.isFinite(Number(body.equityStopDrawdownPct))) state.cfg.equityStopDrawdownPct = clamp(Number(body.equityStopDrawdownPct), 0, 90);
   // Gate-only 掃描保留名額：可即時分階段放大（8→10）或退回 0，下一 tick 生效
   if (Number.isFinite(Number(body.gateScanMin))) state.cfg.gateScanMin = clamp(Math.round(Number(body.gateScanMin)), 0, 16);
 }
@@ -2308,7 +2317,8 @@ function closePosition(state, p, exit, reason, exitTime) {
     const recentLosses = (state.trades || []).filter((t) => t.pnl < 0 && exitTime - t.exitTime <= lossWindowMs).length;
     if (recentLosses >= 3) state.pausedUntil = Math.max(Number(state.pausedUntil || 0), exitTime + lossWindowMs);
   }
-  if (safeDiv(state.peakEquity - state.equity, state.peakEquity, 0) >= 0.12) state.running = false;
+  const stopPct = Number(state.cfg?.equityStopDrawdownPct || 0);
+  if (stopPct > 0 && safeDiv(state.peakEquity - state.equity, state.peakEquity, 0) >= stopPct / 100) state.running = false;
 }
 
 function takeBreakEvenPartial(state, p, exitTime) {

@@ -39,6 +39,10 @@
 - **策略規則本身**（進出場條件、停損停利、分批比例、風險參數）→ 幾乎一定要兩邊都改，讓 dashboard 顯示與 runner 行為一致。
 - ⚠️ **風險常數多空鏡像**：`buildRisk` 對多、空各回傳一組鏡像常數。**2026-08-03 起改以 R（停損寬度）計價**：多單 `tp1:entry*(1 + 4.5*stopPct/100)` ↔ 空單 `entry*(1 - 4.5*stopPct/100)`，be/lockTrigger/lockLevel 同理（1.8 / 3.375 / 1.125）。改任何一個乘數＝改「兩檔 × 多空」**四處**，只改多單那邊是最常見的無聲分岔。舊的固定 % 寫法（`entry*1.20` 等）已移除，理由見 `90-POSTMORTEM-2026-08` §3.2。
 - ⚠️ **同標的連敗封鎖 `repeatLossBlocked`**：HTML 有兩個呼叫點（`applyPortfolio` 回測路徑、`paperTick` 實盤路徑），worker 只有 `eligibleEntrySignals` 一處。HTML 版用原始 `symbol`、worker 版用 `baseAsset(symbol)`（沿用兩檔既有的比對慣例），這是刻意的不對稱。
+- ⚠️ **三個風控機制，別搞混**（2026-11-14 起第一個預設關閉）：
+  1. **權益熔斷** `cfg.equityStopDrawdownPct`（**預設 0＝關閉**，設 12 恢復舊行為）→ 唯一會 `running=false` **停機**的。HTML 兩處（`applyPortfolio` 回測 + `closePosition` 實盤）、worker 一處（`closePosition`）+ `applyConfig`。⚠️ `/control/start` **不會重設 `peakEquity`**，熔斷在每次 `closePosition` 重檢，所以已觸發時「重啟」無效。
+  2. **Prop 日內熔斷** `dailyRiskHalt`（當日回吐 ≥2.5% 或淨虧 ≥3%）→ 只擋**當日**開倉，隔天自動恢復，不停機。
+  3. **滑動窗口連損暫停**（6h 內 3 筆虧損 → `pausedUntil` +6h）→ 只擋新開倉。
 - ⚠️ **被 harness 抽取的函式新增依賴時**，要同步更新 `scripts/backtest-strategies.mjs` 的 NAMES 清單，否則回測會 ReferenceError（`repeatLossBlocked` 即為此類）。
 - **資料抓取、掃描預算、KV/Queue、通知** → 通常只在 worker。
 - **畫面、圖表、PnL 分析頁** → 只在 HTML。
