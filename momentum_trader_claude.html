@@ -528,6 +528,15 @@ const CFG = {
   // ⚠️ 這是唯一會「停機」的風控；日內熔斷（-2.5%/-3%，只擋當日開倉）與連損暫停（6h 內 3 敗）仍在作用。
   // 想恢復舊行為：設 12（dashboard 或 POST /control/config，不必重新部署）。
   equityStopDrawdownPct: 0,
+  // 早期保護（全做多策略、以 R 計）：浮盈達 +earlyProtectR R → 停損從 -1R 拉到 -earlyProtectLevelR R。
+  // **不追峰值**——與 07-24「真空區峰值回吐」、07-28「提前啟動移動停損」兩條死路不同機制：
+  // 那兩個都在贏家洗盤時把它砍掉；這個只把「曾浮盈 1.25R 卻吐光」的最壞結果從 -1R 縮成 -0.25R，
+  // 贏家只要沒跌回 -0.25R 就完全不受影響。
+  // OKX harness 兩個窗口（10/15–11/14、10/26–11/25）：候選層 +5.3R / +8.9R，**兩窗口尾巴(R≥3)筆數都完整保留**；
+  // 停到保本(Level=0)兩窗口都砍尾 1~5 筆，故不取。見 90-POSTMORTEM §9。回檔單沿用專屬 +3%/-1%，空單不適用。
+  // 設 earlyProtectR = 0 即關閉。
+  earlyProtectR: 1.25,
+  earlyProtectLevelR: 0.25,
   // 動能熄火出場：已過 be 減倉、連續 N 根 15m 收盤未創新高(多)/新低(空)→了結剩餘。
   // ATR≥momentumMinAtr% 的高波動標的用 momentumStallBars(8)；低波動慢磨標的(股票代幣)改用較長的
   // momentumLowAtrStallBars，而非完全豁免——原本的豁免讓 PEPE 這類標的停滯 106 根仍不出場、峰值 +13.7% 一路吐回。
@@ -1255,6 +1264,13 @@ function buildRisk(entry, atrValue, side='long', structStop=null){
   const stopPct = (1 - stop / entry) * 100;
   return { stop, tp1:entry*(1 + R.tp1*stopPct/100), beTrigger:entry*(1 + R.be*stopPct/100), lockTrigger:entry*(1 + R.lockTrigger*stopPct/100), lockLevel:entry*(1 + R.lockLevel*stopPct/100), trailPct, stopPct };
 }
+// 早期保護價位（見 CFG.earlyProtectR 註解）。只給做多；stopPct 必須是覆寫後的實際停損寬度。
+function earlyProtectLevels(strategyKey, entry, stopPct, cfg=CFG){
+  if(strategyKey === 'pullback_uptrend') return { earlyTrigger: entry * 1.03, earlyLevel: entry * 0.99 };
+  const r = Number(cfg?.earlyProtectR || 0);
+  if(!(r > 0) || !(stopPct > 0)) return { earlyTrigger: undefined, earlyLevel: undefined };
+  return { earlyTrigger: entry * (1 + r * stopPct / 100), earlyLevel: entry * (1 - Number(cfg.earlyProtectLevelR || 0) * stopPct / 100) };
+}
 function effectiveStopFor(p){
   if(p.side === 'short'){
     const low = p.lowest || p.entry;
@@ -1369,6 +1385,7 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
         side:'long', entry:price, stop:risk.stop, tp1:risk.tp1,
         beTrigger:risk.beTrigger, lockTrigger:risk.lockTrigger,
         lockLevel:risk.lockLevel, trailPct:risk.trailPct,
+        ...earlyProtectLevels('volume_breakout_follow', price, risk.stopPct),
         atrPct:atrValue, quoteVolume, reasons, metrics,
       };
     }
@@ -1460,8 +1477,8 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
     // 回檔/題材單停損上限 4%：贏單 MAE 不超過 3.5%，更寬的停損只稀釋賺賠比
     if((key === 'pullback_uptrend' || key === 'narrative_momentum') && risk.stopPct > 4){ risk.stop = price * 0.96; risk.stopPct = 4; metrics.stopPct = 4; }
     // 回檔單專屬 +3% 早期保護：浮盈 +3% 後停損拉到 -1%（原 +4%；實盤重放 20 筆停損中 6 筆 MFE 落在 3-4%，降到 +3% 把這批從 -1R 救成 -0.25R，對贏家零影響）
-    const earlyTrigger = key === 'pullback_uptrend' ? price * 1.03 : undefined;
-    const earlyLevel = key === 'pullback_uptrend' ? price * 0.99 : undefined;
+    // 其餘做多策略：以 R 計的早期保護（見 CFG.earlyProtectR）
+    const { earlyTrigger, earlyLevel } = earlyProtectLevels(key, price, risk.stopPct);
     return { scannedAt, symbol, score, strategyKey:key, strategyLabel:LABELS[key], side:'long', entry:price, stop:risk.stop, tp1:risk.tp1, beTrigger:risk.beTrigger, lockTrigger:risk.lockTrigger, lockLevel:risk.lockLevel, earlyTrigger, earlyLevel, trailPct:risk.trailPct, atrPct:atrValue, quoteVolume, reasons, metrics };
   }
 
@@ -1593,9 +1610,8 @@ function simulateTrade(symbol, strategyKey, score, rows, entryIndex, equity){
   // 回檔/題材單停損上限 4%（與 evaluateSignal 一致）
   if((strategyKey === 'pullback_uptrend' || strategyKey === 'narrative_momentum') && risk.stopPct > 4){ risk.stop = entry * 0.96; risk.stopPct = 4; }
   const originalStop = risk.stop;
-  // 回檔單專屬 +3% 早期保護（見 evaluateSignal 註解）
-  const earlyTrigger = strategyKey === 'pullback_uptrend' ? entry * 1.03 : null;
-  const earlyLevel = strategyKey === 'pullback_uptrend' ? entry * 0.99 : null;
+  // 早期保護（回檔單 +3%/-1%；其餘做多以 R 計，見 CFG.earlyProtectR）。空單不適用（effectiveStopFor 空單分支無此層）
+  const { earlyTrigger, earlyLevel } = side === 'long' ? earlyProtectLevels(strategyKey, entry, risk.stopPct) : { earlyTrigger: null, earlyLevel: null };
   const sized = positionSize(equity, entry, risk.stop);
   let remainingQty = sized.qty, realized = 0, bePartialDone = false, tp1Done = false, stop = risk.stop;
   let highest = entry, lowest = entry, mfe = 0, mae = 0, lastExtremeIdx = entryIndex;

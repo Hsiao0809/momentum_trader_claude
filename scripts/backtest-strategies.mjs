@@ -52,7 +52,7 @@ function loadStrategyModule(source) {
     .map((name) => extractConst(source, name)).join('\n');
   const names = [
     'nowMs', 'evaluateSignal', 'classifyMarketContext', 'closedKlines', 'atrPct', 'rangePosition',
-    'buildRisk', 'strategyKey', 'sideForStrategy', 'btcRiskOff',
+    'buildRisk', 'earlyProtectLevels', 'strategyKey', 'sideForStrategy', 'btcRiskOff',
     'kOpen', 'kHigh', 'kLow', 'kClose', 'kVol', 'kTime',
     'pct', 'safeDiv', 'clamp', 'mean', 'median', 'ema',
     'simulateTrade', 'positionSize', 'applyPortfolio', 'repeatLossBlocked', 'summarize', 'findIndex',

@@ -44,6 +44,7 @@ const simulateTrade = new Function(
   `${extractFunction(htmlSource, 'effectiveStopFor')}
    ${extractFunction(htmlSource, 'stopReasonFor')}
    ${extractFunction(htmlSource, 'stopAtBarOpen')}
+   ${extractFunction(htmlSource, 'earlyProtectLevels')}
    ${extractFunction(htmlSource, 'simulateTrade')}
    return simulateTrade;`,
 )(

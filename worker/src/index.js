@@ -95,6 +95,15 @@ const DEFAULT_CFG = {
   // 連損暫停（6h 內 3 敗 → pausedUntil）仍在作用，未一併移除。
   // 想恢復舊行為：設 12（POST /control/config 即時生效，不必重新部署）。
   equityStopDrawdownPct: 0,
+  // 早期保護（全做多策略、以 R 計）：浮盈達 +earlyProtectR R → 停損從 -1R 拉到 -earlyProtectLevelR R。
+  // **不追峰值**——與 07-24「真空區峰值回吐」、07-28「提前啟動移動停損」兩條死路不同機制：
+  // 那兩個都在贏家洗盤時把它砍掉；這個只把「曾浮盈 1.25R 卻吐光」的最壞結果從 -1R 縮成 -0.25R，
+  // 贏家只要沒跌回 -0.25R 就完全不受影響。
+  // OKX harness 兩個窗口（10/15–11/14、10/26–11/25）：候選層 +5.3R / +8.9R，**兩窗口尾巴(R≥3)筆數都完整保留**；
+  // 停到保本(Level=0)兩窗口都砍尾 1~5 筆，故不取。見 90-POSTMORTEM §9。回檔單沿用專屬 +3%/-1%，空單不適用。
+  // 設 earlyProtectR = 0 即關閉（POST /control/config 即時生效）。
+  earlyProtectR: 1.25,
+  earlyProtectLevelR: 0.25,
   scanLimit: 35,
   maxKlineScans: 16,
   scanBatchSize: COMPLETE_SCAN_BATCH_SIZE,
@@ -857,6 +866,9 @@ function applyConfig(state, body = {}) {
   if (Number.isFinite(Number(body.repeatLossBlockDays))) state.cfg.repeatLossBlockDays = clamp(Number(body.repeatLossBlockDays), 0, 90);
   // 權益熔斷門檻：0 = 關閉（現行預設），12 = 恢復舊行為。不必重新部署
   if (Number.isFinite(Number(body.equityStopDrawdownPct))) state.cfg.equityStopDrawdownPct = clamp(Number(body.equityStopDrawdownPct), 0, 90);
+  // 早期保護：earlyProtectR=0 關閉；觸發點須低於 be（1.8R）才有意義，故上限 1.75
+  if (Number.isFinite(Number(body.earlyProtectR))) state.cfg.earlyProtectR = clamp(Number(body.earlyProtectR), 0, 1.75);
+  if (Number.isFinite(Number(body.earlyProtectLevelR))) state.cfg.earlyProtectLevelR = clamp(Number(body.earlyProtectLevelR), 0, 1);
   // Gate-only 掃描保留名額：可即時分階段放大（8→10）或退回 0，下一 tick 生效
   if (Number.isFinite(Number(body.gateScanMin))) state.cfg.gateScanMin = clamp(Math.round(Number(body.gateScanMin)), 0, 16);
 }
@@ -2047,6 +2059,7 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
         side: 'long', entry: price, lastPrice: price,
         stop: risk.stop, tp1: risk.tp1, beTrigger: risk.beTrigger,
         lockTrigger: risk.lockTrigger, lockLevel: risk.lockLevel,
+        ...earlyProtectLevels('volume_breakout_follow', price, risk.stopPct, cfg),
         trailPct: risk.trailPct, atrPct: atrValue, quoteVolume, reasons, metrics,
       };
     }
@@ -2141,8 +2154,8 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
     // 回檔/題材單停損上限 4%：贏單 MAE 不超過 3.5%，更寬的停損只稀釋賺賠比
     if ((key === 'pullback_uptrend' || key === 'narrative_momentum') && risk.stopPct > 4) { risk.stop = price * 0.96; risk.stopPct = 4; metrics.stopPct = 4; }
     // 回檔單專屬 +3% 早期保護：浮盈 +3% 後停損拉到 -1%（原 +4%；實盤重放 20 筆停損中 6 筆 MFE 落在 3-4%，降到 +3% 把這批從 -1R 救成 -0.25R，對贏家零影響）
-    const earlyTrigger = key === 'pullback_uptrend' ? price * 1.03 : undefined;
-    const earlyLevel = key === 'pullback_uptrend' ? price * 0.99 : undefined;
+    // 其餘做多策略：以 R 計的早期保護（見 DEFAULT_CFG.earlyProtectR）
+    const { earlyTrigger, earlyLevel } = earlyProtectLevels(key, price, risk.stopPct, cfg);
     return { scannedAt, symbol, instId, score, strategyKey: key, strategyLabel: LABELS[key], side: 'long', entry: price, lastPrice: price, stop: risk.stop, tp1: risk.tp1, beTrigger: risk.beTrigger, lockTrigger: risk.lockTrigger, lockLevel: risk.lockLevel, earlyTrigger, earlyLevel, trailPct: risk.trailPct, atrPct: atrValue, quoteVolume, reasons, metrics };
   }
 
@@ -2708,6 +2721,14 @@ function buildRisk(entry, atrValue, side = 'long', structStop = null) {
   if (structStop && structStop < stop) stop = Math.max(structStop, entry * 0.90);
   const stopPct = (1 - stop / entry) * 100;
   return { stop, tp1: entry * (1 + R.tp1 * stopPct / 100), beTrigger: entry * (1 + R.be * stopPct / 100), lockTrigger: entry * (1 + R.lockTrigger * stopPct / 100), lockLevel: entry * (1 + R.lockLevel * stopPct / 100), trailPct, stopPct };
+}
+
+// 早期保護價位（見 DEFAULT_CFG.earlyProtectR 註解）。只給做多；stopPct 必須是覆寫後的實際停損寬度。
+function earlyProtectLevels(strategyKey, entry, stopPct, cfg) {
+  if (strategyKey === 'pullback_uptrend') return { earlyTrigger: entry * 1.03, earlyLevel: entry * 0.99 };
+  const r = Number(cfg?.earlyProtectR || 0);
+  if (!(r > 0) || !(stopPct > 0)) return { earlyTrigger: undefined, earlyLevel: undefined };
+  return { earlyTrigger: entry * (1 + r * stopPct / 100), earlyLevel: entry * (1 - Number(cfg.earlyProtectLevelR || 0) * stopPct / 100) };
 }
 
 function effectiveStopFor(p) {

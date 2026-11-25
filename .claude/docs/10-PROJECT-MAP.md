@@ -33,7 +33,7 @@
 
 以下函式在 **兩個檔案各有一份**，同名不同源（HTML 吃 Binance K 線格式、worker 吃正規化後的 OKX/Gate K 線）。改策略邏輯時，先在兩檔各 grep 一次，決定改一邊還是兩邊，並在回覆中明說理由：
 
-`evaluateSignal`、`scanSignals`、`buildRisk`、`repeatLossBlocked`、`effectiveStopFor`、`stopReasonFor`、`stopAtBarOpen`、`positionSize`、`closePosition`、`takeBreakEvenPartial`、`takeTP1`、`updatePositions`、`atrPct`、`btcRiskOff`、`strategyKey`、`sideForStrategy`、`closedKlines`、`rangePosition`、`kHigh`/`kLow`/`kClose`/`kVol`/`kTime`、`ema`/`mean`/`median`、`pct`/`safeDiv`/`clamp`
+`evaluateSignal`、`scanSignals`、`buildRisk`、`earlyProtectLevels`、`repeatLossBlocked`、`effectiveStopFor`、`stopReasonFor`、`stopAtBarOpen`、`positionSize`、`closePosition`、`takeBreakEvenPartial`、`takeTP1`、`updatePositions`、`atrPct`、`btcRiskOff`、`strategyKey`、`sideForStrategy`、`closedKlines`、`rangePosition`、`kHigh`/`kLow`/`kClose`/`kVol`/`kTime`、`ema`/`mean`/`median`、`pct`/`safeDiv`/`clamp`
 
 判斷準則：
 - **策略規則本身**（進出場條件、停損停利、分批比例、風險參數）→ 幾乎一定要兩邊都改，讓 dashboard 顯示與 runner 行為一致。
@@ -43,6 +43,7 @@
   1. **權益熔斷** `cfg.equityStopDrawdownPct`（**預設 0＝關閉**，設 12 恢復舊行為）→ 唯一會 `running=false` **停機**的。HTML 兩處（`applyPortfolio` 回測 + `closePosition` 實盤）、worker 一處（`closePosition`）+ `applyConfig`。⚠️ `/control/start` **不會重設 `peakEquity`**，熔斷在每次 `closePosition` 重檢，所以已觸發時「重啟」無效。
   2. **Prop 日內熔斷** `dailyRiskHalt`（當日回吐 ≥2.5% 或淨虧 ≥3%）→ 只擋**當日**開倉，隔天自動恢復，不停機。
   3. **滑動窗口連損暫停**（6h 內 3 筆虧損 → `pausedUntil` +6h）→ 只擋新開倉。
+- ⚠️ **早期保護 `earlyProtectLevels`**（2026-11-25 起全做多策略）：回傳 `{earlyTrigger, earlyLevel}`，pullback 固定 +3%/-1%，其餘以 R 計（`cfg.earlyProtectR`/`earlyProtectLevelR`）。**每個做多訊號出口都要掛上**——HTML 三處（`evaluateSignal` 主路徑、`volume_breakout_follow` impulse 路徑、`simulateTrade`），worker 兩處（同兩個 `evaluateSignal` 出口）。新增做多策略或新出口時漏掛＝該策略沒有早期保護、且與回測不同源。`stopPct` 必須傳**覆寫後**的實際停損寬度。被 harness 抽取，三份抽取清單（`backtest-strategies.mjs`、`verify-market-context.mjs`、`verify-intrabar-order.mjs`）都已加入。
 - ⚠️ **被 harness 抽取的函式新增依賴時**，要同步更新 `scripts/backtest-strategies.mjs` 的 NAMES 清單，否則回測會 ReferenceError（`repeatLossBlocked` 即為此類）。
 - **資料抓取、掃描預算、KV/Queue、通知** → 通常只在 worker。
 - **畫面、圖表、PnL 分析頁** → 只在 HTML。
