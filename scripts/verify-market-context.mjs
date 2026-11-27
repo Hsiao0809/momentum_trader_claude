@@ -43,7 +43,7 @@ function loadClassifier(source) {
 function loadEvaluator(source) {
   const dependencies = [
     'evaluateSignal', 'classifyMarketContext', 'closedKlines', 'atrPct',
-    'rangePosition', 'buildRisk', 'strategyKey', 'kOpen', 'kHigh', 'kLow',
+    'rangePosition', 'buildRisk', 'earlyProtectLevels', 'strategyKey', 'kOpen', 'kHigh', 'kLow',
     'kClose', 'kVol', 'kTime', 'pct', 'safeDiv', 'clamp', 'mean', 'median', 'ema',
   ].map((name) => extractFunction(source, name)).join('\n');
   return new Function(`
