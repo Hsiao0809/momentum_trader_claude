@@ -104,6 +104,12 @@ const DEFAULT_CFG = {
   // 設 earlyProtectR = 0 即關閉（POST /control/config 即時生效）。
   earlyProtectR: 1.25,
   earlyProtectLevelR: 0.25,
+  // 空單總開關（唯一的空單策略 rally_downtrend）。預設 true＝維持現行行為。
+  // 實盤（gate/xyz 小幣）79 筆空單 -0.299R、每一種 BTC 行情都虧（連 BTC 單邊下跌時也 -0.129R）；
+  // 但 OKX 主流幣 harness 在空頭期（9/26–11/25）停做空會讓候選層 -21.5R（虛無百分位 1%）——兩樣本衝突，
+  // 依 LESSONS 07-29 慣例做成開關、保留預設，由使用者實盤 A/B。見 90-POSTMORTEM §10。
+  // POST /control/config {"allowShorts": false} 即時關閉，不必重新部署。
+  allowShorts: true,
   scanLimit: 35,
   maxKlineScans: 16,
   scanBatchSize: COMPLETE_SCAN_BATCH_SIZE,
@@ -869,6 +875,8 @@ function applyConfig(state, body = {}) {
   // 早期保護：earlyProtectR=0 關閉；觸發點須低於 be（1.8R）才有意義，故上限 1.75
   if (Number.isFinite(Number(body.earlyProtectR))) state.cfg.earlyProtectR = clamp(Number(body.earlyProtectR), 0, 1.75);
   if (Number.isFinite(Number(body.earlyProtectLevelR))) state.cfg.earlyProtectLevelR = clamp(Number(body.earlyProtectLevelR), 0, 1);
+  // 空單總開關
+  if (typeof body.allowShorts === 'boolean') state.cfg.allowShorts = body.allowShorts;
   // Gate-only 掃描保留名額：可即時分階段放大（8→10）或退回 0，下一 tick 生效
   if (Number.isFinite(Number(body.gateScanMin))) state.cfg.gateScanMin = clamp(Math.round(Number(body.gateScanMin)), 0, 16);
 }
@@ -2161,6 +2169,8 @@ function evaluateSignal(symbol, instId, rows, quoteVolume, scannedAt, riskOff, c
 
   // ══ 空頭分支：下降趨勢反彈衰竭（EMA 下方且斜率為負）══
   if (!aboveEma && emaSlope < 0) {
+    // 空單總開關（見 DEFAULT_CFG.allowShorts）；用 === false 讓沒有此欄位的舊 state 維持原行為
+    if (cfg?.allowShorts === false) return null;
     if (momentum1h <= -6) return null;
     if (position24h <= 0.05 && momentum1h < 0) return null;
     if (momentum24h <= -10 && momentum4h > 1) return null;

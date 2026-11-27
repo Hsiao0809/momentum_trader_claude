@@ -537,6 +537,11 @@ const CFG = {
   // 設 earlyProtectR = 0 即關閉。
   earlyProtectR: 1.25,
   earlyProtectLevelR: 0.25,
+  // 空單總開關（唯一的空單策略 rally_downtrend）。預設 true＝維持現行行為。
+  // 實盤（gate/xyz 小幣）79 筆空單 -0.299R、每一種 BTC 行情都虧（連 BTC 單邊下跌時也 -0.129R）；
+  // 但 OKX 主流幣 harness 在空頭期（9/26–11/25）停做空會讓候選層 -21.5R（虛無百分位 1%）——兩樣本衝突，
+  // 依 LESSONS 07-29 慣例做成開關、保留預設，由使用者實盤 A/B。見 90-POSTMORTEM §10。
+  allowShorts: true,
   // 動能熄火出場：已過 be 減倉、連續 N 根 15m 收盤未創新高(多)/新低(空)→了結剩餘。
   // ATR≥momentumMinAtr% 的高波動標的用 momentumStallBars(8)；低波動慢磨標的(股票代幣)改用較長的
   // momentumLowAtrStallBars，而非完全豁免——原本的豁免讓 PEPE 這類標的停滯 106 根仍不出場、峰值 +13.7% 一路吐回。
@@ -1484,6 +1489,8 @@ function evaluateSignal(symbol, rows, quoteVolume, scannedAt=nowMs(), riskOff=fa
 
   // ══ 空頭分支：下降趨勢反彈衰竭（EMA 下方且斜率為負）══
   if(!aboveEma && emaSlope < 0){
+    // 空單總開關（見 CFG.allowShorts）；用 === false 讓沒有此欄位的舊設定維持原行為
+    if(CFG.allowShorts === false) return null;
     if(momentum1h <= -6) return null;
     if(position24h <= 0.05 && momentum1h < 0) return null;
     if(momentum24h <= -10 && momentum4h > 1) return null;
