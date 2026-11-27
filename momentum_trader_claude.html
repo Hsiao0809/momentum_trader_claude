@@ -470,6 +470,8 @@ const FAPI = 'https://fapi.binance.com';
 const PAPER_API = 'https://momentum-trader-claude-runner.siaosiao1016.workers.dev';
 const SERVER_MODE = Boolean(PAPER_API);
 const INTERVAL_MS = { '15m': 900000 };
+// 個幣震盪閘門的回看小時數（見 CFG.chopGateER）
+const CHOP_ER_HOURS = 96;
 const RECENT_SIGNAL_TTL_MS = 30 * 60 * 1000;
 const RECENT_SIGNAL_LIMIT = 50;
 // 歷史訊號：純瀏覽器端留存，worker 不參與（不影響 runner）。每次輪詢 snapshot 順手累積，保留 7 天。
@@ -542,6 +544,9 @@ const CFG = {
   // 但 OKX 主流幣 harness 在空頭期（9/26–11/25）停做空會讓候選層 -21.5R（虛無百分位 1%）——兩樣本衝突，
   // 依 LESSONS 07-29 慣例做成開關、保留預設，由使用者實盤 A/B。見 90-POSTMORTEM §10。
   allowShorts: true,
+  // 個幣震盪閘門：訊號標的自身最近 96 小時 1H 收盤的 efficiency ratio（|淨變動| / 路徑長）< 此值
+  // ＝該幣在震盪區間內來回，不追動能進場。0 = 關閉。依據與代價見 90-POSTMORTEM §11（worker 同名設定）。
+  chopGateER: 0.2,
   // 動能熄火出場：已過 be 減倉、連續 N 根 15m 收盤未創新高(多)/新低(空)→了結剩餘。
   // ATR≥momentumMinAtr% 的高波動標的用 momentumStallBars(8)；低波動慢磨標的(股票代幣)改用較長的
   // momentumLowAtrStallBars，而非完全豁免——原本的豁免讓 PEPE 這類標的停滯 106 根仍不出場、峰值 +13.7% 一路吐回。
@@ -1556,6 +1561,15 @@ async function scanSignals(){
       try {
         const rows = await klines(t.symbol, '15m', 130);
         const sig = evaluateSignal(t.symbol, rows, t.quoteVolumeFloat, nowMs(), riskOff, minScore);
+        if(sig && CFG.chopGateER > 0){
+          try {
+            const er = efficiencyRatio((await klines(t.symbol, '1h', CHOP_ER_HOURS + 1)).map(r => r[4]));
+            if(er != null){
+              sig.metrics = { ...(sig.metrics || {}), er96: er };
+              if(chopBlocked(er)){ sig.chopBlocked = true; sig.reasons = [`震盪：96h ER ${er.toFixed(2)} < ${CFG.chopGateER.toFixed(2)}，不進場`, ...(sig.reasons || [])]; }
+            }
+          } catch(e) { console.warn('chop ER', t.symbol, e); }
+        }
         if(sig) signals.push(sig);
       } catch(e) {
         console.warn(t.symbol, e);
@@ -1692,6 +1706,28 @@ function summarize(trades){
   });
   return { initialEquity:CFG.initialEquity, endingEquity:equity, netPnl:equity-CFG.initialEquity, netReturnPct:pct(CFG.initialEquity, equity)||0, tradeCount:trades.length, winRatePct:safeDiv(wins, trades.length, 0)*100, profitFactor:safeDiv(gp, gl, gp || 0), maxDrawdownPct:maxDd, avgR: trades.length ? mean(trades.map(t=>t.rMultiple)) : 0 };
 }
+// ── 個幣震盪閘門（雙實作：worker 同名函式）──
+// closes：等間距收盤價（舊→新）。回傳 |淨變動| / Σ|逐根變動|，資料不足回傳 null（＝不擋）。
+function efficiencyRatio(closes){
+  const xs = (closes || []).map(Number).filter(x => Number.isFinite(x) && x > 0);
+  if(xs.length < CHOP_ER_HOURS + 1) return null;
+  const h = xs.slice(-(CHOP_ER_HOURS + 1));
+  let path = 0;
+  for(let k=1;k<h.length;k++) path += Math.abs(h[k] - h[k-1]);
+  return path > 0 ? Math.abs(h[h.length-1] - h[0]) / path : 0;
+}
+function chopBlocked(er, cfg=CFG){
+  const th = Number(cfg?.chopGateER || 0);
+  return th > 0 && er != null && Number.isFinite(Number(er)) && Number(er) < th;
+}
+// 回測用：從 15m rows 取到第 i 根為止、每 4 根取一個收盤（＝逐小時），與線上 1H 收盤等價。
+function erFrom15mRows(rows, i){
+  const n = CHOP_ER_HOURS * 4;
+  if(i < n) return null;
+  const closes = [];
+  for(let k=i-n;k<=i;k+=4) closes.push(Number(rows[k][4]));
+  return efficiencyRatio(closes);
+}
 // 同標的連敗封鎖（見 CFG.repeatLossBlockCount 註解）。trades 需含 symbol/pnl/exitTime，
 // 只看 now 之前已平倉的紀錄；連續虧損計數遇到任何一筆獲利即歸零。
 function repeatLossBlocked(trades, symbol, now){
@@ -1744,7 +1780,8 @@ async function runBacktest(){
     const days = Number(document.getElementById('days').value || 30);
     const minScore = Number(document.getElementById('minScore').value || 70);
     const universe = Number(document.getElementById('universe').value || 30);
-    const end = nowMs(), start = end - (days + 2) * 24*60*60*1000;
+    // +5 天暖機：震盪閘門要 96h 歷史才生效（見 erFrom15mRows）
+    const end = nowMs(), start = end - (days + 5) * 24*60*60*1000;
     log(`Backtest loading universe...`);
     const tickers = await topSymbols(universe);
     const btc = await historicalKlines('BTCUSDT', '15m', start, end);
@@ -1761,7 +1798,7 @@ async function runBacktest(){
         if(barTime < end - days*24*60*60*1000){ i++; continue; }
         const riskOff = btcRiskOff(btc.filter(k => kTime(k) <= barTime));
         const sig = evaluateSignal(t.symbol, rows.slice(0, i + 1), t.quoteVolumeFloat, barTime, riskOff, minScore);
-        if(sig && sig.score >= minScore){
+        if(sig && sig.score >= minScore && !chopBlocked(erFrom15mRows(rows, i))){
           const trade = simulateTrade(t.symbol, sig.strategyKey, sig.score, rows, i + 1, CFG.initialEquity);
           if(trade){ trade.quoteVolume = t.quoteVolumeFloat; candidates.push(trade); i = Math.max(i + 1, findIndex(rows, trade.exitTime) + CFG.cooldownBars); continue; }
         }
@@ -1853,6 +1890,7 @@ async function paperTick(){
     .filter(sig => !openSymbols.has(sig.symbol)
       && !stoppedRecent.has(sig.symbol)
       && !repeatLossBlocked(state.trades, sig.symbol, nowMs())
+      && !chopBlocked(sig.metrics?.er96)
       && sig.score >= CFG.paperMinScore
       && !(sig.strategyKey === 'narrative_momentum' && sig.score < CFG.paperMinScore + 8));
   const latestResults = await Promise.allSettled(candidates.map(async sig => [

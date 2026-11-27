@@ -50,6 +50,11 @@ function extractConst(source, name) {
 function loadStrategyModule(source) {
   const constants = ['INTERVAL_MS', 'LABELS', 'STRATEGY_SIDES', 'CFG']
     .map((name) => extractConst(source, name)).join('\n');
+  const scalars = ['CHOP_ER_HOURS'].map((name) => {
+    const m = source.match(new RegExp(`const ${name} = [^;\\n]+;`));
+    assert.ok(m, `const ${name} was not found in source`);
+    return m[0];
+  }).join('\n');
   const names = [
     'nowMs', 'evaluateSignal', 'classifyMarketContext', 'closedKlines', 'atrPct', 'rangePosition',
     'buildRisk', 'earlyProtectLevels', 'strategyKey', 'sideForStrategy', 'btcRiskOff',
@@ -57,12 +62,14 @@ function loadStrategyModule(source) {
     'pct', 'safeDiv', 'clamp', 'mean', 'median', 'ema',
     'simulateTrade', 'positionSize', 'applyPortfolio', 'repeatLossBlocked', 'summarize', 'findIndex',
     'stopAtBarOpen', 'effectiveStopFor', 'stopReasonFor',
+    'efficiencyRatio', 'chopBlocked', 'erFrom15mRows',
   ];
   const dependencies = names.map((name) => extractFunction(source, name)).join('\n');
   const factory = new Function(`
     ${constants}
+    ${scalars}
     ${dependencies}
-    return { evaluateSignal, simulateTrade, applyPortfolio, summarize, findIndex, kTime, kClose, pct, CFG };
+    return { evaluateSignal, simulateTrade, applyPortfolio, summarize, findIndex, kTime, kClose, pct, CFG, chopBlocked, erFrom15mRows };
   `);
   return factory();
 }
@@ -146,7 +153,9 @@ for (const [instId, rows] of Object.entries(candles)) {
   while (i < rows.length - 2) {
     const barTime = mod.kTime(rows[i]);
     const sig = mod.evaluateSignal(symbol, rows.slice(0, i + 1), quoteVolume, barTime, riskOffAt(barTime), MIN_SCORE);
-    if (sig && sig.score >= MIN_SCORE && !(sig.strategyKey === 'narrative_momentum' && sig.score < NARRATIVE_MIN)) {
+    // 個幣震盪閘門：對齊線上 eligibleEntrySignals / paperTick（CFG.chopGateER=0 時不擋）
+    if (sig && sig.score >= MIN_SCORE && !(sig.strategyKey === 'narrative_momentum' && sig.score < NARRATIVE_MIN)
+      && !mod.chopBlocked(mod.erFrom15mRows(rows, i))) {
       const trade = mod.simulateTrade(symbol, sig.strategyKey, sig.score, rows, i + 1, 1000);
       if (trade) {
         trade.quoteVolume = quoteVolume; // applyPortfolio 的 tie-break 需要（對齊線上 signalSort）

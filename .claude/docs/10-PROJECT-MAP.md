@@ -33,7 +33,7 @@
 
 以下函式在 **兩個檔案各有一份**，同名不同源（HTML 吃 Binance K 線格式、worker 吃正規化後的 OKX/Gate K 線）。改策略邏輯時，先在兩檔各 grep 一次，決定改一邊還是兩邊，並在回覆中明說理由：
 
-`evaluateSignal`、`scanSignals`、`buildRisk`、`earlyProtectLevels`、`repeatLossBlocked`、`effectiveStopFor`、`stopReasonFor`、`stopAtBarOpen`、`positionSize`、`closePosition`、`takeBreakEvenPartial`、`takeTP1`、`updatePositions`、`atrPct`、`btcRiskOff`、`strategyKey`、`sideForStrategy`、`closedKlines`、`rangePosition`、`kHigh`/`kLow`/`kClose`/`kVol`/`kTime`、`ema`/`mean`/`median`、`pct`/`safeDiv`/`clamp`
+`evaluateSignal`、`scanSignals`、`buildRisk`、`earlyProtectLevels`、`repeatLossBlocked`、`efficiencyRatio`/`chopBlocked`（震盪閘門）、`effectiveStopFor`、`stopReasonFor`、`stopAtBarOpen`、`positionSize`、`closePosition`、`takeBreakEvenPartial`、`takeTP1`、`updatePositions`、`atrPct`、`btcRiskOff`、`strategyKey`、`sideForStrategy`、`closedKlines`、`rangePosition`、`kHigh`/`kLow`/`kClose`/`kVol`/`kTime`、`ema`/`mean`/`median`、`pct`/`safeDiv`/`clamp`
 
 判斷準則：
 - **策略規則本身**（進出場條件、停損停利、分批比例、風險參數）→ 幾乎一定要兩邊都改，讓 dashboard 顯示與 runner 行為一致。
@@ -43,6 +43,7 @@
   1. **權益熔斷** `cfg.equityStopDrawdownPct`（**預設 0＝關閉**，設 12 恢復舊行為）→ 唯一會 `running=false` **停機**的。HTML 兩處（`applyPortfolio` 回測 + `closePosition` 實盤）、worker 一處（`closePosition`）+ `applyConfig`。⚠️ `/control/start` **不會重設 `peakEquity`**，熔斷在每次 `closePosition` 重檢，所以已觸發時「重啟」無效。
   2. **Prop 日內熔斷** `dailyRiskHalt`（當日回吐 ≥2.5% 或淨虧 ≥3%）→ 只擋**當日**開倉，隔天自動恢復，不停機。
   3. **滑動窗口連損暫停**（6h 內 3 筆虧損 → `pausedUntil` +6h）→ 只擋新開倉。
+- ⚠️ **個幣震盪閘門 `chopGateER`**（2026-11-27，預設 0.2）：`efficiencyRatio(closes)` 吃 97 個逐小時收盤、資料不足回 null（＝不擋）；`chopBlocked(er, cfg)` 在進場篩選擋（worker `eligibleEntrySignals`、HTML `paperTick`）。ER 的來源三處不同但須等價：worker `attachChopER`（掃到非 xyz 訊號才多抓 97 根 1H，OKX bar 寫 `1H`）、HTML 瀏覽器掃描（Binance 1H）、回測（HTML 內建回測與 harness 用 `erFrom15mRows`，15m 每 4 根取一）。`CHOP_ER_HOURS` 是純量常數，harness 另行抽取。**掃描路徑 subrequest：每批（2 檔）最多 +2**。
 - ⚠️ **早期保護 `earlyProtectLevels`**（2026-11-25 起全做多策略）：回傳 `{earlyTrigger, earlyLevel}`，pullback 固定 +3%/-1%，其餘以 R 計（`cfg.earlyProtectR`/`earlyProtectLevelR`）。**每個做多訊號出口都要掛上**——HTML 三處（`evaluateSignal` 主路徑、`volume_breakout_follow` impulse 路徑、`simulateTrade`），worker 兩處（同兩個 `evaluateSignal` 出口）。新增做多策略或新出口時漏掛＝該策略沒有早期保護、且與回測不同源。`stopPct` 必須傳**覆寫後**的實際停損寬度。被 harness 抽取，三份抽取清單（`backtest-strategies.mjs`、`verify-market-context.mjs`、`verify-intrabar-order.mjs`）都已加入。
 - ⚠️ **被 harness 抽取的函式新增依賴時**，要同步更新 `scripts/backtest-strategies.mjs` 的 NAMES 清單，否則回測會 ReferenceError（`repeatLossBlocked` 即為此類）。
 - **資料抓取、掃描預算、KV/Queue、通知** → 通常只在 worker。
@@ -83,7 +84,7 @@
 
 1. **免費儲存預算**：除了每日 288 次 cron，完整 16 檔掃描還會用 7 次 alarm continuation。以每 10 分鐘一次完整掃描的保守上限計算，最多 1,296 次 coordinator requests/日；連同 state chunks、metadata 與 `setAlarm()` row write，單 chunk 約 3,600 rows/日、五 chunks 約 8,784 rows/日，低於 100,000/日。KV 不再有 cron lock/state write，只保留舊狀態相容讀取與通知狀態。→ tick/scan/alarm 路徑新增持久化時仍須先計算每日用量。
    **「動到 tick/掃描/KV 路徑」的機械判準**：你的 diff 是否改變了每次 tick 的外部 fetch 次數或 KV write 次數？是 → 逐條核對本節；否（純計算邏輯、UI、文案）→ 不需。
-2. **掃描與 subrequest 預算**：完整 scan plan ≤ 16 個 K-line；含 8 個持倉、三市場 universe、BTC 情境和最多 16 個最新成交價時，掃描 tick 最壞約 44 個外部 subrequests，低於 Free 50。持倉 K-line 正常抓 8 根，落後時同一個 subrequest 動態擴大到最多 300 根；超過 300 根也只在每次 tick 抓一個錨定 chunk，不能在單次 invocation 內迴圈補完。→ 不要加不設上限的迴圈 fetch。
+2. **掃描與 subrequest 預算**：完整 scan plan ≤ 16 個 K-line；含 8 個持倉、三市場 universe、BTC 情境和最多 16 個最新成交價時，掃描 tick 最壞約 44 個外部 subrequests，低於 Free 50（震盪閘門：掃到訊號才補抓 1H，每批 2 檔 → 每 invocation 最多 +2）。持倉 K-line 正常抓 8 根，落後時同一個 subrequest 動態擴大到最多 300 根；超過 300 根也只在每次 tick 抓一個錨定 chunk，不能在單次 invocation 內迴圈補完。→ 不要加不設上限的迴圈 fetch。
 3. **Subrequest 上限**：通知走 Queue 就是為了避開掃描路徑的 subrequest 限制。→ 不要把通知改回掃描時同步直發。
 4. **Worker 端禁用 Binance**（403）。Worker 使用 OKX + Gate，瀏覽器獨立模式才能用 Binance。
 5. **策略行為改動**（停損/停利/分批/開倉條件）屬於使用者的交易決策 → 除非使用者明確要求，不要「順手優化」。
